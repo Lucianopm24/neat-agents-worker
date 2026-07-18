@@ -151,6 +151,16 @@ async function callVercel(env, method, path, body, username, idemKey) {
   });
 }
 
+
+// El contrato con el agente es SIEMPRE JSON. Si el cerebro (Vercel) devuelve HTML
+// (p.ej. Express "Cannot POST ..." cuando un endpoint aún no está desplegado o Vercel caído),
+// lo envolvemos en el formato de error estándar en vez de pasarlo crudo.
+function isJsonResp(r) { return (r.headers.get("content-type") || "").includes("json"); }
+function upstreamNonJson(rl) {
+  return err(502, "UPSTREAM_ERROR", "El cerebro de Neat respondió algo que no es JSON (¿endpoint sin desplegar o Vercel caído?).",
+    "Reintenta en unos segundos. Si persiste, avisa a tu humano para revisar el backend.", rl);
+}
+
 // ── Reader Fase 1: URL → markdown legible (sin render JS) ──
 const READ_UA = "NeatForAgents-Reader/0.1 (+https://agents.neat.qzz.io)";
 const READ_MAX_CHARS = 15000;
@@ -331,6 +341,7 @@ export default {
         let nbody;
         try { nbody = await request.json(); } catch { return err(400, "BAD_JSON", "Body JSON inválido.", "Envía {message: 'texto corto'}", rl); }
         const proxy = await callVercel(env, "POST", "/agents/internal/nudge", nbody, keyRow.username);
+        if (!isJsonResp(proxy)) return upstreamNonJson(rl);
         const ntext = await proxy.text();
         return new Response(ntext, { status: proxy.status, headers: { "content-type": "application/json; charset=utf-8", ...rl } });
       }
@@ -382,6 +393,7 @@ export default {
           }
         }
         const proxy = await callVercel(env, method, "/agents/internal" + sub + qs, body, keyRow.username, idem);
+        if (!isJsonResp(proxy)) return upstreamNonJson(rl);
         const text = await proxy.text();
 
         // Guardar idempotencia tras 201
