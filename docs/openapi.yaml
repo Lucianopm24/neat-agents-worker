@@ -1,0 +1,193 @@
+openapi: 3.0.3
+info:
+  title: Neat for Agents — Notes API
+  version: 0.1.0
+  description: >
+    Cuaderno persistente para agentes de IA. Pull-first: tu agente consulta
+    cuando despierta. Cada key la crea un humano verificado desde id.neat.qzz.io.
+    Errores autodescriptivos: el campo `error.fix` te dice cómo corregir.
+  x-quota: {requests_per_day: 100, max_notes: 100, max_note_bytes: 65536}
+servers:
+  - url: https://agents.neat.qzz.io/api/v1
+security:
+  - bearerAuth: []
+tags: [{name: notes}, {name: meta}]
+paths:
+  /notes:
+    post:
+      tags: [notes]
+      summary: Crear una nota
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          schema: {type: string}
+          description: UUID por operación; reintentos con la misma key devuelven la nota original sin duplicar.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                title: {type: string, maxLength: 200, example: "Estado del sprint"}
+                content: {type: string, description: "Markdown", example: "## Pendientes\n- [ ] deploy"}
+                tags: {type: array, items: {type: string, maxLength: 40}, maxItems: 10, example: ["work"]}
+      responses:
+        '201': {$ref: '#/components/responses/Note'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+    get:
+      tags: [notes]
+      summary: Listar notas (pull-first)
+      parameters:
+        - name: updated_since
+          in: query
+          schema: {type: string, format: date-time}
+          description: 'Patrón "qué pasó mientras dormía": solo notas modificadas después de este instante.'
+        - name: q
+          in: query
+          schema: {type: string}
+          description: Búsqueda en título y contenido (case-insensitive).
+        - name: tag
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, default: 20, maximum: 100}
+        - name: offset
+          in: query
+          schema: {type: integer, default: 0}
+      responses:
+        '200':
+          description: Lista + estado de cuota
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: {type: boolean, example: true}
+                  data:
+                    type: object
+                    properties:
+                      notes: {type: array, items: {$ref: '#/components/schemas/Note'}}
+                      total: {type: integer}
+                      quota: {$ref: '#/components/schemas/Quota'}
+                  tip: {type: string, example: "Usa ?updated_since= para traer solo lo que cambió desde tu última sesión."}
+  /notes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      tags: [notes]
+      summary: Leer una nota
+      responses:
+        '200': {$ref: '#/components/responses/Note'}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [notes]
+      summary: Actualizar (parcial)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: {type: string, maxLength: 200}
+                content: {type: string}
+                tags: {type: array, items: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Note'}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [notes]
+      summary: Borrar (soft-delete, purga a 30 días)
+      responses:
+        '200':
+          description: Confirmación
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OkEnvelope'}
+  /inbox:
+    get:
+      tags: [meta]
+      summary: Check-in del agente ("¿qué pasó mientras dormía?")
+      description: Devuelve notas recientes, cuota restante y avisos del servicio. Ideal como PRIMERA llamada de cada sesión.
+      responses:
+        '200':
+          description: Resumen de sesión
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: {type: boolean, example: true}
+                  data:
+                    type: object
+                    properties:
+                      recent_notes: {type: array, items: {$ref: '#/components/schemas/Note'}}
+                      quota: {$ref: '#/components/schemas/Quota'}
+                      notices:
+                        type: array
+                        items: {type: string}
+                        example: ["El 2026-08-01 sube max_notes a 250"]
+                  tip: {type: string, example: "Guarda el timestamp de esta llamada para tu próximo ?updated_since="}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Key `neat_sk_...` creada por tu humano en https://id.neat.qzz.io (sección API keys).
+  schemas:
+    Note:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string, nullable: true}
+        content: {type: string, nullable: true, description: "Omitido en listados; incluir ?expand=content si se requiere"}
+        tags: {type: array, items: {type: string}}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Quota:
+      type: object
+      properties:
+        requests_today: {type: integer}
+        requests_limit: {type: integer, example: 100}
+        notes_used: {type: integer}
+        notes_limit: {type: integer, example: 100}
+    OkEnvelope:
+      type: object
+      properties:
+        success: {type: boolean}
+        tip: {type: string, nullable: true}
+    ErrorEnvelope:
+      type: object
+      properties:
+        success: {type: boolean, example: false}
+        error:
+          type: object
+          properties:
+            code: {type: string, example: "QUOTA_EXCEEDED"}
+            message: {type: string, example: "Límite de 100 requests/día alcanzado."}
+            fix: {type: string, example: "Espera al reset de 00:00 UTC o pide a tu humano Neat Plus (cuota x5)."}
+  responses:
+    Note:
+      description: Una nota
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: {type: boolean, example: true}
+              data: {$ref: '#/components/schemas/Note'}
+              tip: {type: string, nullable: true}
+    Error:
+      description: Error autodescriptivo
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorEnvelope'}

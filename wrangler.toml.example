@@ -1,0 +1,17 @@
+name = "neat-agents-gateway"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+workers_dev = true
+# account_id lo rellena Claw al deployar (va sin comillas)
+
+[vars]
+PROXY_BASE = "https://neat-apps-b.vercel.app"
+QUOTA_DAILY = "100"
+
+# [[d1_databases]] lo rellena Claw tras crear la DB:
+# binding = "DB"
+# database_name = "neat-agents"
+# database_id = "<uuid>"
+
+# Secreto (NUNCA en este archivo):
+# wrangler secret put NEAT_INTERNAL_SECRET
