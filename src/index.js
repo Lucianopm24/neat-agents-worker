@@ -18,11 +18,11 @@ const LLMS_TXT = `# Neat for Agents
 ## Lo esencial
 - Base URL: https://agents.neat.qzz.io/api/v1
 - Auth: header Authorization: Bearer neat_sk_... (la crea tu humano en https://id.neat.qzz.io)
-- Endpoints: POST/GET /notes, GET/PATCH/DELETE /notes/{id}, GET /inbox (check-in de sesión)
+- Endpoints: POST/GET /notes, GET/PATCH/DELETE /notes/{id}, GET /inbox (check-in), POST /nudge (avisar al humano, 5/día), GET /reader?url= (URL→markdown, Fase 1 sin JS)
 - Patrón clave: GET /notes?updated_since=<ISO-8601> = "qué pasó mientras dormía"
 - POST acepta header Idempotency-Key (reintentos seguros)
 - Errores: JSON con error.code, error.message, error.fix
-- Cuota gratis: 100 req/día. Headers X-RateLimit-* en cada respuesta
+- Cuota gratis: 100 req/día. Headers X-RateLimit-* en cada respuesta\n- Reader: GET /reader?url=... → {title, markdown, excerpt} — Fase 1: HTML estático + text/plain; no ejecuta JS
 - Las notas de agente nacen visibility=private (tu cuaderno, no el quiosco)
 `;
 
@@ -150,18 +150,86 @@ async function callVercel(env, method, path, body, username, idemKey) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }
+
+// ── Reader Fase 1: URL → markdown legible (sin render JS) ──
+const READ_UA = "NeatForAgents-Reader/0.1 (+https://agents.neat.qzz.io)";
+const READ_MAX_CHARS = 15000;
+const BLOCKED_HOST_RE = /^(localhost|127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|\[::1\]|.*\.(internal|local|lan))$/i;
+
+function readErr(status, code, message, fix) { const e = new Error(message); e.payload = { status, code, message, fix }; return e; }
+
+async function readPage(target) {
+  let u;
+  try { u = new URL(target); } catch { throw readErr(400, "BAD_URL", "URL inválida.", "Pasa una URL absoluta: ?url=https://ejemplo.com"); }
+  if (!/^https?:$/.test(u.protocol)) throw readErr(400, "BAD_PROTOCOL", "Solo http(s).", "Usa https:// en la URL.");
+  if (BLOCKED_HOST_RE.test(u.hostname.toLowerCase()))
+    throw readErr(403, "SSRF_BLOCKED", "Esa dirección no es legible (red privada o interna).", "Solo URLs públicas de internet.");
+
+  let resp;
+  try {
+    resp = await fetch(u.toString(), {
+      headers: { "user-agent": READ_UA, "accept": "text/html,text/plain,text/markdown,application/xhtml+xml" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(12000),
+    });
+  } catch { throw readErr(502, "UNREACHABLE", "No pude alcanzar ese sitio (timeout o red).", "Verifica que la URL carga y reintenta."); }
+  if (!resp.ok) throw readErr(502, "UPSTREAM", `El sitio respondió ${resp.status}.`, "Verifica que la URL existe y carga en un navegador.");
+
+  const ctype = (resp.headers.get("content-type") || "").toLowerCase();
+  if (ctype.includes("text/plain") || ctype.includes("text/markdown")) {
+    const raw = (await resp.text()).slice(0, READ_MAX_CHARS);
+    return { url: resp.url || u.toString(), title: null, markdown: raw, excerpt: raw.slice(0, 220), length: raw.length, rendered: false };
+  }
+  if (!ctype.includes("html")) throw readErr(415, "NOT_HTML", `Ese recurso no es legible (${ctype || "desconocido"}).`, "La Fase 1 lee HTML y texto plano (pdf/imágenes: roadmap).");
+
+  // Limpieza heurística de junk antes de extraer (documentada: es heurística, no parser perfecto)
+  let html = await resp.text();
+  html = html
+    .replace(/<\!\[[\s\S]*?\]>/g, "")
+    .replace(/<(script|style|noscript|svg|template|iframe|form|nav|footer|header|aside)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
+
+  let title = "";
+  const parts = [];
+  let buffer = "", lastTag = null;
+  const flush = () => {
+    const t = buffer.replace(/\s+/g, " ").trim();
+    buffer = "";
+    if (!t || t.length < 2) return;
+    if (lastTag === "h1") { title = title || t; parts.push("# " + t); }
+    else if (lastTag === "h2") parts.push("\n## " + t);
+    else if (lastTag === "h3") parts.push("\n### " + t);
+    else if (lastTag === "li") parts.push("- " + t);
+    else if (lastTag === "pre") parts.push("\n```\n" + t + "\n```");
+    else parts.push(t);
+  };
+  const cap = (tag) => ({
+    text(t) { if (tag === "title") { title = title || t.text.trim(); return; } buffer += t.text; if (t.lastInTextNode) { lastTag = tag; flush(); } },
+  });
+  await new HTMLRewriter()
+    .on("title", cap("title"))
+    .on("h1", cap("h1")).on("h2", cap("h2")).on("h3", cap("h3"))
+    .on("p", cap("p")).on("li", cap("li")).on("blockquote", cap("p")).on("pre", cap("pre"))
+    .transform(new Response(html)).text();
+
+  let md = parts.join("\n\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, READ_MAX_CHARS);
+  if (!md) throw readErr(422, "EMPTY_PAGE", "No extraje texto legible (¿SPA con JS o página bloqueada?).", "Este sitio quizá necesita rendering (Fase 2); prueba con su versión AMP/rss o docs estáticas.");
+  const firstPara = parts.find((x) => !x.startsWith("#") && !x.startsWith("- ")) || md;
+  return { url: resp.url || u.toString(), title: title || null, markdown: md, excerpt: firstPara.slice(0, 220), length: md.length, rendered: false };
+}
+
 function manifest(env) {
   return {
     name: "Neat for Agents", version: "0.1.0",
     description: "Persistent notes API for AI agents. Pull-first by design.",
-    capabilities: ["notes.create", "notes.read", "notes.search", "notes.update", "notes.delete", "session.checkin"],
+    capabilities: ["notes.create", "notes.read", "notes.search", "notes.update", "notes.delete", "session.checkin", "nudge.send", "reader.read"],
     base_url: "https://agents.neat.qzz.io/api/v1",
     auth: { type: "bearer", header: "Authorization: Bearer neat_sk_...",
       how_to_get: "Your human creates a key at https://id.neat.qzz.io (API keys section, scope: notes)" },
     docs: { quickstart: "https://agents.neat.qzz.io/docs.md",
       openapi: "https://github.com/Lucianopm24/neat-agents-worker/blob/main/docs/openapi.yaml",
       llms_txt: "https://agents.neat.qzz.io/llms.txt" },
-    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), default_visibility: "private" },
+    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
     patterns: ["pull-first", "updated_since", "idempotency-key", "ErrorEnvelope.fix"],
     tip: "First call of every session: GET /inbox — it tells you what happened while you slept.",
   };
@@ -251,6 +319,34 @@ export default {
 
       const sub = p.replace("/api/v1", "");
       const rl = rlHeaders(limit, used);
+
+      // Nudge: notificar al humano (cuota aparte: NUDGE_DAILY/día)
+      if (sub === "/nudge" && request.method === "POST") {
+        const nday = "n:" + day;
+        const nlimit = parseInt(env.NUDGE_DAILY || "5", 10);
+        await env.DB.prepare("INSERT INTO usage_daily (key_hash, day, count) VALUES (?, ?, 1) ON CONFLICT(key_hash, day) DO UPDATE SET count = count + 1").bind(hash, nday).run();
+        const nused = (await env.DB.prepare("SELECT count FROM usage_daily WHERE key_hash = ? AND day = ?").bind(hash, nday).first())?.count || 1;
+        if (nused > nlimit)
+          return err(429, "NUDGE_LIMIT", `Máximo ${nlimit} nudges al día.`, "Tu humano merece paz. Guarda lo urgente en una nota (notes no tiene límite por item) y sigue trabajando.", rl);
+        let nbody;
+        try { nbody = await request.json(); } catch { return err(400, "BAD_JSON", "Body JSON inválido.", "Envía {message: 'texto corto'}", rl); }
+        const proxy = await callVercel(env, "POST", "/agents/internal/nudge", nbody, keyRow.username);
+        const ntext = await proxy.text();
+        return new Response(ntext, { status: proxy.status, headers: { "content-type": "application/json; charset=utf-8", ...rl } });
+      }
+
+      // Reader Fase 1: URL → markdown (sin render JS)
+      if (sub === "/reader" && request.method === "GET") {
+        const target = url.searchParams.get("url");
+        if (!target) return err(400, "MISSING_URL", "Falta ?url= en la query.", "Ej: GET /api/v1/reader?url=https://ejemplo.com/articulo", rl);
+        try {
+          const page = await readPage(target);
+          return Response.json({ success: true, data: page, tip: "Fase 1 no ejecuta JS: si el contenido sale vacío, el sitio probablemente renderiza en cliente." }, { headers: rl });
+        } catch (e) {
+          if (e && e.payload) return err(e.payload.status, e.payload.code, e.payload.message, e.payload.fix, rl);
+          return err(500, "READER_ERROR", "Error interno del reader.", "Reintenta con backoff (1s, 5s, 30s).", rl);
+        }
+      }
 
       // Check-in de sesión
       if (sub === "/inbox" && request.method === "GET") {
