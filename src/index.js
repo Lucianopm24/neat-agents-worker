@@ -119,7 +119,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Neat for Agents</title>
 <style>
- body{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:0 auto;padding:2rem 1.2rem;background:#0b0f14;color:#e6edf3;line-height:1.6}
+ body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:0 auto;padding:2rem 1.2rem;background:#0b0f14;color:#e6edf3;line-height:1.6}
  h1{font-size:1.9rem;margin-bottom:.2rem} h1 span{color:#58a6ff}
  .sub{color:#8b949e;font-size:1.05rem;margin-bottom:2rem}
  .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1.2rem 1.4rem;margin-bottom:1rem}
@@ -128,27 +128,42 @@ const LANDING_HTML = `<!DOCTYPE html>
  a{color:#58a6ff}
  .steps li{margin-bottom:.6rem}
  .badge{display:inline-block;background:#1f6feb33;border:1px solid #1f6feb;border-radius:999px;padding:.15rem .7rem;font-size:.75rem;color:#58a6ff;margin-right:.4rem}
+ .feats{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:.6rem}
+ .feat{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:.7rem .9rem;font-size:.88rem}
+ .feat b{display:block;font-size:.95rem;margin-bottom:.15rem}
+ @media(max-width:560px){.feats{grid-template-columns:1fr}}
  footer{color:#8b949e;font-size:.85rem;margin-top:2.5rem;border-top:1px solid #30363d;padding-top:1rem}
 </style></head><body>
 <h1>Neat <span>for Agents</span> 🦞</h1>
-<p class="sub">Tu agente de IA también merece un cuaderno. Memoria persistente pull-first, sin captchas, sin forms, sin navegador.</p>
+<p class="sub">Tu agente de IA ya sabe recordar, avisarte, leer la web y chatear contigo — con tu permiso, etiquetado y siempre a la vista.</p>
 <div class="card">
-<span class="badge">v0.1</span><span class="badge">free tier</span><span class="badge">human-verified keys</span>
+<span class="badge">v0.4</span><span class="badge">free tier</span><span class="badge">human-verified keys</span>
 </div>
-<div class="card"><h2 style="margin-top:0">Cómo funciona</h2><ol class="steps">
-<li><b>Tú</b> creas una API key en tu cuenta Neat (30 segundos): <a href="https://id.neat.qzz.io">id.neat.qzz.io</a></li>
-<li><b>Se la das</b> a tu agente junto a los docs: <a href="/docs.md">/docs.md</a></li>
-<li><b>Tu agente</b> empieza a recordar: <code>POST /api/v1/notes</code> · <code>GET /api/v1/notes?updated_since=…</code></li>
+<div class="card"><h2 style="margin-top:0">Empieza en 2 minutos</h2><ol class="steps">
+<li><b>Crea tu cuenta gratis</b> en <a href="https://neat.qzz.io/play/">Neat Play</a> (30 segundos, sin tarjeta).</li>
+<li><b>Entra a <a href="https://neat.qzz.io/account">Mi cuenta</a></b> → sección <b>API Keys para agentes 🦞</b> → crea una key.</li>
+<li><b>Dásela a tu agente</b> junto a los docs: <a href="/docs.md">/docs.md</a> o <a href="/llms.txt">/llms.txt</a>. Él hará el resto.</li>
+<li>Cuando quieras, mira <b>"Actividad de tu agente 🕵️"</b> en tu cuenta: todo lo que hace queda a la vista.</li>
 </ol></div>
+<div class="card"><h2 style="margin-top:0">Todo lo que tu agente puede hacer</h2><div class="feats">
+<div class="feat"><b>📝 Notas</b>Memoria persistente entre sesiones. Privadas por defecto.</div>
+<div class="feat"><b>🔔 Nudge</b>Te avisa al teléfono cuando importa. 5 avisos/día.</div>
+<div class="feat"><b>💬 Chatter</b>Habla contigo y en tus chats, siempre con etiqueta 🦞. 20 msg/día.</div>
+<div class="feat"><b>📖 Reader</b>Lee páginas web y te las resume. 15k caracteres por página.</div>
+<div class="feat"><b>🗝️ KV</b>Su bloc privado de datos pequeños. 100 llaves × 2KB.</div>
+<div class="feat"><b>🕵️ Audit</b>Su rastro completo: lo que hizo, cuándo y dónde. Transparencia.</div>
+</div></div>
 <div class="card"><h2 style="margin-top:0">Por qué Neat</h2><ul>
-<li>🧑‍🤝‍🧑 <b>Humanos verificados detrás de cada key</b> — agentes con alguien que responde por ellos.</li>
+<li>🧑‍🤝‍🧑 <b>Un humano verificado detrás de cada key</b> — agentes con alguien que responde por ellos.</li>
+<li>🏷️ <b>Nunca de incógnito</b> — todo lo que un agente escribe lleva su sello: notas, mensajes, avisos.</li>
+<li>🔑 <b>Una sola key, todo el ecosistema</b> — mismo auth, mismos errores que se auto-explican, mismas cuotas.</li>
 <li>🔄 <b>Pull-first</b> — los agentes viven en sesiones; consultan al despertar. Diseñado así desde el día 1.</li>
 <li>📄 <b>Docs que un LLM entiende</b> — markdown, OpenAPI, llms.txt.</li>
 <li>🆓 <b>Gratis de verdad</b> — 100 requests/día sin tarjeta. Más cuota con Neat Plus.</li>
 </ul></div>
 <div class="card"><h2 style="margin-top:0">¿Eres un agente? 🤖</h2>
 <p>Pide esto con <code>Accept: application/json</code> y recibes el manifiesto máquina-legible.
-O lee directamente <a href="/docs.md">docs.md</a> y <a href="/llms.txt">llms.txt</a>.</p>
+O lee directamente <a href="/docs.md">docs.md</a> y <a href="/llms.txt">llms.txt</a>. Si usas librerías HTTP crudas, pon un <code>User-Agent</code> descriptivo (los genéricos reciben 403).</p>
 <pre>GET /api/v1/inbox
 Authorization: Bearer neat_sk_…</pre></div>
 <footer>Parte del ecosistema <a href="https://neat.qzz.io">Neat</a>. El consentimiento humano primero, siempre. 🦞</footer>
