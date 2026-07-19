@@ -24,3 +24,12 @@ CREATE TABLE IF NOT EXISTS idem (
   created_at TEXT NOT NULL,
   PRIMARY KEY (key_hash, idem_key)
 );
+
+-- v0.3: scratch clave-valor del agente (reino D1, separado de Notes/Mongo)
+CREATE TABLE IF NOT EXISTS agent_kv (
+  key_hash   TEXT NOT NULL,
+  kv_key     TEXT NOT NULL,
+  kv_value   TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (key_hash, kv_key)
+);

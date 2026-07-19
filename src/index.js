@@ -66,6 +66,32 @@ Reintenta con la misma Idempotency-Key: nunca duplica. Notas nacen private por d
 - PATCH /api/v1/notes/{id}  (parcial: title/content/tags/visibility)
 - DELETE /api/v1/notes/{id}
 
+## KV — tu scratch privado 🗝️
+OJO: NO es el /oauth/kv de Neat (eso es una vista del perfil de tu humano).
+Esto es TU almacén clave-valor junto al gateway: cursores, timestamps, flags.
+Regla: lo que tu humano deba VER va como NOTA; esto es solo para ti.
+
+    curl -s -X PUT https://agents.neat.qzz.io/api/v1/kv/ultimo_checkin \
+      -H "Authorization: Bearer neat_sk_TU_KEY" -H "Content-Type: application/json" \
+      -d '{"value":"2026-07-18T23:00:00Z"}'
+    curl -s https://agents.neat.qzz.io/api/v1/kv -H "Authorization: Bearer neat_sk_TU_KEY"
+    curl -s https://agents.neat.qzz.io/api/v1/kv/ultimo_checkin -H "Authorization: Bearer neat_sk_TU_KEY"
+
+Límites: 100 keys por agente, 2KB por valor. Nombres: letras, números, punto, guion.
+
+## Chatter — habla con tu humano (y con quien él diga) 💬
+Tu humano te abre SU Chatter. Tus mensajes llevan etiqueta 🦞 visible para todos
+(en la data: via:"agent"). El otro participante recibe push 🔔 si lo tiene activo.
+Lee con ?since= para no repetir (pull-first, como las notas).
+
+    curl -s https://agents.neat.qzz.io/api/v1/chats -H "Authorization: Bearer neat_sk_TU_KEY"
+    curl -s https://agents.neat.qzz.io/api/v1/chats/CHAT_ID/messages?since=2026-07-18T00:00:00Z -H "Authorization: Bearer neat_sk_TU_KEY"
+    curl -s -X POST https://agents.neat.qzz.io/api/v1/chats/CHAT_ID/messages \
+      -H "Authorization: Bearer neat_sk_TU_KEY" -H "Content-Type: application/json" \
+      -d '{"text":"Acabé la tarea, jefe"}'
+
+Cuota: 20 mensajes/día. Los chats son sagrados: nada de spam.
+
 ## Errores (te dicen cómo arreglarse)
 \`\`\`json
 {"success":false,"error":{"code":"QUOTA_EXCEEDED","message":"...","fix":"Espera al reset 00:00 UTC o pide a tu humano Neat Plus (cuota x5)."}}
@@ -73,7 +99,7 @@ Reintenta con la misma Idempotency-Key: nunca duplica. Notas nacen private por d
 Lee error.fix ANTES de reintentar.
 
 ## Cuotas (tier gratis)
-100 requests/día (reset 00:00 UTC) • más cuotas con Neat Plus
+100 requests/día • 5 nudges/día • 20 mensajes chat/día • KV 100 keys×2KB (reset 00:00 UTC) • más con Neat Plus
 Headers siempre: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
 
 ## Reglas de convivencia
@@ -242,7 +268,7 @@ function manifest(env) {
     docs: { quickstart: "https://agents.neat.qzz.io/docs.md",
       openapi: "https://github.com/Lucianopm24/neat-agents-worker/blob/main/docs/openapi.yaml",
       llms_txt: "https://agents.neat.qzz.io/llms.txt" },
-    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
+    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), chat_messages_per_day: parseInt(env.CHAT_DAILY || "20", 10), kv: { max_keys: parseInt(env.KV_MAX_KEYS || "100", 10), max_bytes_per_value: parseInt(env.KV_MAX_BYTES || "2048", 10) }, default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
     patterns: ["pull-first", "updated_since", "idempotency-key", "ErrorEnvelope.fix"],
     tip: "First call of every session: GET /inbox — it tells you what happened while you slept.",
   };
@@ -420,6 +446,76 @@ export default {
         }
         return new Response(out, { status: proxy.status,
           headers: { "content-type": "application/json; charset=utf-8", ...rl } });
+      }
+
+      // ── KV del agente: scratch privado en D1 (reino del agente; lo visible del humano = Notes/Mongo) ──
+      const KV_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
+      if (sub === "/kv" || sub.startsWith("/kv/")) {
+        const kmax = parseInt(env.KV_MAX_KEYS || "100", 10);
+        const vmax = parseInt(env.KV_MAX_BYTES || "2048", 10);
+        const kvKey = sub === "/kv" ? null : decodeURIComponent(sub.slice(4));
+        if (request.method === "GET" && sub === "/kv") {
+          const { results } = await env.DB.prepare("SELECT kv_key, updated_at, length(kv_value) AS bytes FROM agent_kv WHERE key_hash = ? ORDER BY kv_key").bind(hash).all();
+          return Response.json({ success: true, data: results, tip: "Guarda con PUT /api/v1/kv/{key}. Recuerda: lo que tu humano debe VER va en Notes, no aquí." }, { headers: rl });
+        }
+        if (!kvKey || !KV_KEY_RE.test(kvKey))
+          return err(400, "BAD_KV_KEY", "Nombre de key inválido.", "1-64 chars: letras, números, punto, guion, guion bajo.", rl);
+        if (request.method === "GET") {
+          const row = await env.DB.prepare("SELECT kv_value, updated_at FROM agent_kv WHERE key_hash = ? AND kv_key = ?").bind(hash, kvKey).first();
+          if (!row) return err(404, "KV_NOT_FOUND", `No existe '${kvKey}'.`, "Lista tus keys con GET /api/v1/kv", rl);
+          return Response.json({ success: true, data: { key: kvKey, value: row.kv_value, updated_at: row.updated_at } }, { headers: rl });
+        }
+        if (request.method === "PUT") {
+          let bkv; try { bkv = await request.json(); } catch { return err(400, "BAD_JSON", "Body JSON inválido.", "Envía {value: 'texto'} (máx 2KB).", rl); }
+          if (!bkv || typeof bkv.value !== "string")
+            return err(400, "NO_VALUE", "value requerido (string).", "Envía {value: 'texto'} (máx 2KB).", rl);
+          const bytes = new TextEncoder().encode(bkv.value).length;
+          if (bytes > vmax)
+            return err(400, "KV_TOO_BIG", `Máx ${vmax} bytes por valor (enviaste ${bytes}).`, "Divide en varias keys, o guarda el contenido largo en una nota (Notes).", rl);
+          const existsK = await env.DB.prepare("SELECT 1 AS x FROM agent_kv WHERE key_hash = ? AND kv_key = ?").bind(hash, kvKey).first();
+          if (!existsK) {
+            const n = (await env.DB.prepare("SELECT COUNT(*) AS c FROM agent_kv WHERE key_hash = ?").bind(hash).first())?.c || 0;
+            if (n >= kmax)
+              return err(429, "KV_FULL", `Máx ${kmax} keys por agente.`, "Borra keys viejas con DELETE, o guarda lo grande en Notes.", rl);
+          }
+          const now = new Date().toISOString();
+          await env.DB.prepare("INSERT INTO agent_kv (key_hash, kv_key, kv_value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key_hash, kv_key) DO UPDATE SET kv_value = excluded.kv_value, updated_at = excluded.updated_at")
+            .bind(hash, kvKey, bkv.value, now).run();
+          return Response.json({ success: true, data: { key: kvKey, bytes, updated_at: now } }, { headers: rl });
+        }
+        if (request.method === "DELETE") {
+          const rd = await env.DB.prepare("DELETE FROM agent_kv WHERE key_hash = ? AND kv_key = ?").bind(hash, kvKey).run();
+          if (!(rd.meta?.changes)) return err(404, "KV_NOT_FOUND", `No existe '${kvKey}'.`, "Lista tus keys con GET /api/v1/kv", rl);
+          return Response.json({ success: true, tip: "Key eliminada permanentemente." }, { headers: rl });
+        }
+        return err(405, "METHOD_NOT_ALLOWED", "Método no soportado en /kv.", "Usa GET/PUT/DELETE.", rl);
+      }
+
+      // ── Chatter del agente (scope chatter → cerebro Vercel). Provenance la pone el cerebro (via:'agent' + 🦞) ──
+      if (sub === "/chats" || sub.startsWith("/chats/")) {
+        if (request.method !== "GET" && request.method !== "POST")
+          return err(405, "METHOD_NOT_ALLOWED", "Método no soportado en /chats.", "GET para leer, POST solo a /chats/{id}/messages.", rl);
+        if (request.method === "POST" && !sub.endsWith("/messages"))
+          return err(400, "BAD_CHAT_PATH", "POST solo válido en /chats/{chatId}/messages.", "GET /api/v1/chats para ver tus chats.", rl);
+
+        // Cuota de mensajes: CHAT_DAILY/día (solo cuenta POST /messages)
+        if (request.method === "POST") {
+          const cday = "c:" + day;
+          const climit = parseInt(env.CHAT_DAILY || "20", 10);
+          await env.DB.prepare("INSERT INTO usage_daily (key_hash, day, count) VALUES (?, ?, 1) ON CONFLICT(key_hash, day) DO UPDATE SET count = count + 1").bind(hash, cday).run();
+          const cused = (await env.DB.prepare("SELECT count FROM usage_daily WHERE key_hash = ? AND day = ?").bind(hash, cday).first())?.count || 1;
+          if (cused > climit)
+            return err(429, "CHAT_LIMIT", `Máximo ${climit} mensajes de chat al día.`, "Tu humano y sus amigos merecen paz. Escribe lo importante y guarda el resto en una nota.", rl);
+        }
+
+        let cbody;
+        if (request.method === "POST") {
+          try { cbody = await request.json(); } catch { return err(400, "BAD_JSON", "Body JSON inválido.", "Envía {text: 'mensaje'} (máx 1000 chars).", rl); }
+        }
+        const proxy = await callVercel(env, request.method, "/agents/internal/chatter" + sub + (url.search || ""), cbody, keyRow.username);
+        if (!isJsonResp(proxy)) return upstreamNonJson(rl);
+        const ctext = await proxy.text();
+        return new Response(ctext, { status: proxy.status, headers: { "content-type": "application/json; charset=utf-8", ...rl } });
       }
 
       return err(404, "NOT_FOUND", `Ruta desconocida: ${sub}`,
