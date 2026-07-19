@@ -110,6 +110,9 @@ las credenciales del bot NUNCA se exponen.
     curl -s -OJ https://agents.neat.qzz.io/api/v1/artifacts/ART_ID -H "Authorization: Bearer neat_sk_TU_KEY"
 
 Cuota: 10 subidas/día. Máx 20MB por archivo. Solo salidas finales de trabajo; texto en Notes.
+Bóveda (storage total vigente): 1GB gratis / 25GB con Neat Plus — GET /artifacts devuelve
+storage {used_bytes, max_bytes, plus}. Si se llena: STORAGE_FULL → borra viejos con DELETE,
+o pide a tu humano Plus (él también puede limpiar la bóveda desde su cuenta).
 
 ## Errores (te dicen cómo arreglarse)
 \`\`\`json
@@ -184,6 +187,11 @@ Authorization: Bearer neat_sk_…</pre></div>
 // ── helpers ──────────────────────────────────────────────────────────
 async function sha256hex(text) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function hmacSha256hex(secret, text) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const buf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 function newKey() {
@@ -302,7 +310,7 @@ function manifest(env) {
     docs: { quickstart: "https://agents.neat.qzz.io/docs.md",
       openapi: "https://github.com/Lucianopm24/neat-agents-worker/blob/main/docs/openapi.yaml",
       llms_txt: "https://agents.neat.qzz.io/llms.txt" },
-    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), chat_messages_per_day: parseInt(env.CHAT_DAILY || "20", 10), kv: { max_keys: parseInt(env.KV_MAX_KEYS || "100", 10), max_bytes_per_value: parseInt(env.KV_MAX_BYTES || "2048", 10) }, artifacts: { uploads_per_day: parseInt(env.ART_DAILY || "10", 10), max_bytes: 20971520 }, default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
+    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), chat_messages_per_day: parseInt(env.CHAT_DAILY || "20", 10), kv: { max_keys: parseInt(env.KV_MAX_KEYS || "100", 10), max_bytes_per_value: parseInt(env.KV_MAX_BYTES || "2048", 10) }, artifacts: { uploads_per_day: parseInt(env.ART_DAILY || "10", 10), max_bytes: 20971520, storage_free_bytes: parseInt(env.STORE_FREE_BYTES || "1073741824", 10), storage_plus_bytes: parseInt(env.STORE_PLUS_BYTES || "26843545600", 10) }, default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
     patterns: ["pull-first", "updated_since", "idempotency-key", "ErrorEnvelope.fix"],
     tip: "First call of every session: GET /inbox — it tells you what happened while you slept.",
   };
@@ -362,11 +370,108 @@ export default {
         await env.DB.prepare("UPDATE agent_keys SET revoked = 1 WHERE substr(key_hash,1,8) = ?").bind(prefix).run();
         return Response.json({ success: true, tip: "Key revocada. Efecto inmediato." });
       }
-      return err(404, "NOT_FOUND", "Ruta admin desconocida.", "Rutas: POST/GET /admin/keys, DELETE /admin/keys/:id");
+
+      // Plan Plus del humano (R3): el cerebro lo sincroniza desde Mongo (neatPlus).
+      // Efecto: cuota de almacenamiento de artefactos 1GB → 25GB por agente. Inmediato.
+      if (p === "/admin/keys/plus" && request.method === "POST") {
+        let body;
+        try { body = await request.json(); } catch { return err(400, "BAD_JSON", "Body JSON inválido.", "Envía {username, plus: true|false}"); }
+        const { username, plus } = body || {};
+        if (!username || !/^[a-zA-Z0-9_]{3,30}$/.test(username))
+          return err(400, "BAD_USERNAME", "username requerido (3-30 chars, letras/números/_).", "Envía el username del humano verificado.");
+        await env.DB.prepare("UPDATE agent_keys SET plus = ? WHERE username = ?").bind(plus ? 1 : 0, username).run();
+        return Response.json({ success: true, data: { username, plus: !!plus },
+          tip: `Almacenamiento de artefactos por agente: ${plus ? "25GB (Plus)" : "1GB (gratis)"}. Efecto inmediato en la próxima subida.` });
+      }
+
+      // Artefactos del humano (vista de cuenta): lista + bóveda usada. Solo metadata, nunca bytes.
+      if (p === "/admin/artifacts" && request.method === "GET") {
+        const u = url.searchParams.get("username");
+        if (!u) return err(400, "MISSING_USER", "Falta ?username=", "Lista solo metadata de artefactos de ese humano.");
+        const { results } = await env.DB.prepare(
+          "SELECT a.artifact_id, a.filename, a.mime, a.size, a.created_at FROM agent_artifacts a JOIN agent_keys k ON k.key_hash = a.key_hash WHERE k.username = ? ORDER BY a.created_at DESC LIMIT 100"
+        ).bind(u).all();
+        const used = (await env.DB.prepare(
+          "SELECT COALESCE(SUM(a.size),0) AS u FROM agent_artifacts a JOIN agent_keys k ON k.key_hash = a.key_hash WHERE k.username = ?"
+        ).bind(u).first())?.u || 0;
+        const kr = await env.DB.prepare(
+          "SELECT plus FROM agent_keys WHERE username = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1"
+        ).bind(u).first();
+        const max = kr?.plus ? parseInt(env.STORE_PLUS_BYTES || "26843545600", 10) : parseInt(env.STORE_FREE_BYTES || "1073741824", 10);
+        return Response.json({ success: true, data: results, storage: { used_bytes: used, max_bytes: max, plus: !!kr?.plus } });
+      }
+
+      // Link firmado de descarga para el humano (5 min): el cerebro lo pide y se lo da al navegador.
+      // La verificación vive en /api/v1/artifacts/:id?exp=&h= — el bot token jamás sale del Worker.
+      if (p.match(/^\/admin\/artifacts\/[0-9a-z]{1,32}\/token$/) && request.method === "POST") {
+        const aid = p.split("/")[3];
+        let body;
+        try { body = await request.json(); } catch { return err(400, "BAD_JSON", "Body JSON inválido.", "Envía {username}"); }
+        const { username } = body || {};
+        if (!username || !/^[a-zA-Z0-9_]{3,30}$/.test(username))
+          return err(400, "BAD_USERNAME", "username requerido.", "El cerebro envía el username del humano dueño.");
+        const row = await env.DB.prepare(
+          "SELECT a.artifact_id FROM agent_artifacts a JOIN agent_keys k ON k.key_hash = a.key_hash WHERE a.artifact_id = ? AND k.username = ?"
+        ).bind(aid, username).first();
+        if (!row) return err(404, "ART_NOT_FOUND", "Artefacto no encontrado para ese humano.", "Lista con GET /admin/artifacts?username=");
+        const exp = Math.floor(Date.now() / 1000) + 300;
+        const h = await hmacSha256hex(env.NEAT_INTERNAL_SECRET, `${aid}:${username}:${exp}`);
+        const base = new URL(request.url).origin;
+        return Response.json({ success: true, data: { url: `${base}/api/v1/artifacts/${aid}?exp=${exp}&h=${h}`, expires_in: 300 },
+          tip: "Link de un uso legítimo: dura 5 min y solo sirve para ESTE artefacto de ESTE humano." });
+      }
+
+      // Borrado humano de artefacto (vista de cuenta: liberar espacio de la bóveda)
+      if (p.match(/^\/admin\/artifacts\/[0-9a-z]{1,32}$/) && request.method === "DELETE") {
+        const aid = p.split("/")[3];
+        const u = url.searchParams.get("username");
+        if (!u) return err(400, "MISSING_USER", "Falta ?username=", "Solo se borra si el artefacto es de ese humano.");
+        const row = await env.DB.prepare(
+          "SELECT a.telegram_message_id FROM agent_artifacts a JOIN agent_keys k ON k.key_hash = a.key_hash WHERE a.artifact_id = ? AND k.username = ?"
+        ).bind(aid, u).first();
+        if (!row) return err(404, "ART_NOT_FOUND", "Artefacto no encontrado para ese humano.", "Lista con GET /admin/artifacts?username=");
+        if (row.telegram_message_id && env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_STORAGE_CHAT_ID)
+          await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`, { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ chat_id: env.TELEGRAM_STORAGE_CHAT_ID, message_id: row.telegram_message_id }) }).catch(() => {});
+        await env.DB.prepare("DELETE FROM agent_artifacts WHERE artifact_id = ?").bind(aid).run();
+        return Response.json({ success: true, tip: "Artefacto eliminado (D1 + storage Telegram). Espacio liberado en la bóveda." });
+      }
+
+      return err(404, "NOT_FOUND", "Ruta admin desconocida.", "Rutas: POST/GET /admin/keys, DELETE /admin/keys/:id, POST /admin/keys/plus, GET /admin/artifacts, POST /admin/artifacts/:id/token, DELETE /admin/artifacts/:id");
     }
 
     // ── API de agentes ──
     if (p.startsWith("/api/v1/")) {
+      const sub = p.replace("/api/v1", "");
+
+      // ── Descarga humana firmada (R3 cara humana): GET /api/v1/artifacts/:id?exp=&h= ──
+      // El cerebro emite estos links (POST /admin/artifacts/:id/token) tras validar el JWT del humano.
+      // Firma: HMAC-SHA256(NEAT_INTERNAL_SECRET, `${aid}:${username}:${exp}`) — 5 min, scoped a
+      // artefacto+humano. NO consume la cuota diaria del agente (descarga humana, no llamada de agente).
+      if (sub.startsWith("/artifacts/") && request.method === "GET" && url.searchParams.get("h") && url.searchParams.get("exp")) {
+        const aid = sub.slice(11);
+        const exp = parseInt(url.searchParams.get("exp"), 10) || 0;
+        const h = url.searchParams.get("h");
+        if (!/^[0-9a-z]{1,32}$/.test(aid)) return err(400, "BAD_ART_ID", "artifactId inválido.", "Tu humano genera el link desde su cuenta.");
+        if (Date.now() > exp * 1000) return err(403, "LINK_EXPIRED", "Este link de descarga expiró (duran 5 min por seguridad).", "Tu humano genera uno nuevo en neat.qzz.io/account → Archivos de tu agente.");
+        if (!env.NEAT_INTERNAL_SECRET || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_STORAGE_CHAT_ID)
+          return err(503, "ART_STORAGE_NOT_CONFIGURED", "El almacén de artefactos no está configurado.", "Tu humano revisa la configuración del Worker.");
+        const row = await env.DB.prepare(
+          "SELECT a.*, k.username AS owner FROM agent_artifacts a JOIN agent_keys k ON k.key_hash = a.key_hash WHERE a.artifact_id = ?"
+        ).bind(aid).first();
+        if (!row) return err(404, "ART_NOT_FOUND", "Artefacto no encontrado.", "Puede que tu agente lo haya borrado.");
+        const want = await hmacSha256hex(env.NEAT_INTERNAL_SECRET, `${aid}:${row.owner}:${exp}`);
+        if (h !== want) return err(403, "BAD_SIGNATURE", "Link de descarga inválido (firma no coincide).", "El link lo emite el cerebro de Neat tras verificar a tu humano; no se puede falsificar.");
+        const tgApi = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+        const gf = await (await fetch(`${tgApi}/getFile?file_id=${encodeURIComponent(row.telegram_file_id)}`)).json().catch(() => null);
+        if (!gf?.ok) return err(502, "ART_TG_ERROR", "Telegram no devolvió el archivo.", "Reintenta en unos segundos.");
+        const dl = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${gf.result.file_path}`);
+        if (!dl.ok) return err(502, "ART_TG_ERROR", "Telegram no sirvió el archivo.", "Reintenta en unos segundos.");
+        return new Response(dl.body, { headers: {
+          "content-type": row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+          "x-artifact-size": String(row.size), "cache-control": "private, no-store" } });
+      }
+
       const auth = request.headers.get("authorization") || "";
       const token = auth.replace(/^Bearer\s+/i, "").trim();
       if (!token.startsWith("neat_sk_"))
@@ -390,7 +495,6 @@ export default {
         return err(429, "QUOTA_EXCEEDED", `Límite de ${limit} requests/día alcanzado.`,
           "Espera al reset de 00:00 UTC o pide a tu humano Neat Plus (cuota x5).", rlHeaders(limit, used));
 
-      const sub = p.replace("/api/v1", "");
       const rl = rlHeaders(limit, used);
 
       // Nudge: notificar al humano (cuota aparte: NUDGE_DAILY/día)
@@ -605,7 +709,10 @@ export default {
           const { results } = await env.DB.prepare(
             "SELECT artifact_id, filename, mime, size, created_at FROM agent_artifacts WHERE key_hash = ? ORDER BY created_at DESC LIMIT 50"
           ).bind(hash).all();
-          return Response.json({ success: true, data: results, tip: "Descarga con GET /api/v1/artifacts/{id} (el Worker lo streamea, sin exponer credenciales)." }, { headers: rl });
+          const smax = keyRow.plus ? parseInt(env.STORE_PLUS_BYTES || "26843545600", 10) : parseInt(env.STORE_FREE_BYTES || "1073741824", 10);
+          const sused = (await env.DB.prepare("SELECT COALESCE(SUM(size),0) AS u FROM agent_artifacts WHERE key_hash = ?").bind(hash).first())?.u || 0;
+          return Response.json({ success: true, data: results, storage: { used_bytes: sused, max_bytes: smax, plus: !!keyRow.plus },
+            tip: "Descarga con GET /api/v1/artifacts/{id} (el Worker lo streamea, sin exponer credenciales). Tu humano también ve estos archivos en su cuenta." }, { headers: rl });
         }
 
         if (sub === "/artifacts" && request.method === "POST") {
@@ -637,6 +744,14 @@ export default {
           if (fbuf.byteLength === 0) return err(400, "ART_EMPTY", "El archivo está vacío.", "Nada que guardar en 0 bytes.", rl);
           if (fbuf.byteLength > ART_MAX)
             return err(413, "ART_TOO_BIG", `Máx 20MB por artefacto (enviaste ${(fbuf.byteLength / 1048576).toFixed(1)}MB).`, "Divide el archivo, o guarda su resumen en Notes.", rl);
+
+          // Cuota de bóveda (storage total vigente): 1GB gratis / 25GB Plus (STORE_FREE_BYTES/STORE_PLUS_BYTES)
+          const smax = keyRow.plus ? parseInt(env.STORE_PLUS_BYTES || "26843545600", 10) : parseInt(env.STORE_FREE_BYTES || "1073741824", 10);
+          const sused = (await env.DB.prepare("SELECT COALESCE(SUM(size),0) AS u FROM agent_artifacts WHERE key_hash = ?").bind(hash).first())?.u || 0;
+          if (sused + fbuf.byteLength > smax)
+            return err(403, "STORAGE_FULL",
+              `Bóveda llena: llevas ${(sused / 1073741824).toFixed(2)}GB de ${(smax / 1073741824).toFixed(0)}GB${keyRow.plus ? " (Plus)" : ""}. Este archivo no cabe.`,
+              "Borra artefactos viejos con DELETE /api/v1/artifacts/{id} (tu humano también puede desde su cuenta). ¿Poco espacio? Neat Plus: 25GB.", rl);
 
           const tfd = new FormData();
           tfd.append("chat_id", env.TELEGRAM_STORAGE_CHAT_ID);
