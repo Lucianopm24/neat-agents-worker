@@ -535,7 +535,7 @@ export default {
 
       // Cuota diaria (tabla usage_daily)
       const day = today();
-      const limit = parseInt(env.QUOTA_DAILY || "100", 10);
+      const limit = parseInt(env.QUOTA_DAILY || "100", 10) * (keyRow.plus ? parseInt(env.QUOTA_PLUS_MULT || "5", 10) : 1); // Plus = cuota x5 (lo que los docs ya prometían)
       await env.DB.prepare(
         "INSERT INTO usage_daily (key_hash, day, count) VALUES (?, ?, 1) " +
         "ON CONFLICT(key_hash, day) DO UPDATE SET count = count + 1"
