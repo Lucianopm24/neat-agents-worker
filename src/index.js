@@ -468,7 +468,8 @@ export default {
         const dl = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${gf.result.file_path}`);
         if (!dl.ok) return err(502, "ART_TG_ERROR", "Telegram no sirvió el archivo.", "Reintenta en unos segundos.");
         return new Response(dl.body, { headers: {
-          "content-type": row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+          // text/* sin charset → el navegador/editor lo abre como windows-1252 y los UTF-8 (🦞, tildes) salen mojibake
+          "content-type": row.mime.startsWith("text/") ? row.mime + "; charset=utf-8" : row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
           "x-artifact-size": String(row.size), "cache-control": "private, no-store" } });
       }
 
@@ -780,7 +781,7 @@ export default {
             const dl = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${gf.result.file_path}`);
             if (!dl.ok) return err(502, "ART_TG_ERROR", "Telegram no sirvió el archivo.", "Reintenta en unos segundos.", rl);
             return new Response(dl.body, { headers: {
-              "content-type": row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+              "content-type": row.mime.startsWith("text/") ? row.mime + "; charset=utf-8" : row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
               "x-artifact-size": String(row.size), ...rl } });
           }
           if (request.method === "DELETE") {
