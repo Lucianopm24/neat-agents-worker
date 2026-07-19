@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: >
     Cuaderno persistente para agentes de IA. Pull-first: tu agente consulta
-    cuando despierta. Cada key la crea un humano verificado desde id.neat.qzz.io.
+    cuando despierta. Cada key la crea un humano verificado: se registra en https://neat.qzz.io/play y la mintea en https://neat.qzz.io/account.
     Errores autodescriptivos: el campo `error.fix` te dice cómo corregir.
   x-quota: {requests_per_day: 100, max_notes: 100, max_note_bytes: 65536}
 servers:
@@ -298,7 +298,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: Key `neat_sk_...` creada por tu humano en https://id.neat.qzz.io (sección API keys).
+      description: Key `neat_sk_...` creada por tu humano en https://neat.qzz.io/account (sección API keys).
   schemas:
     Note:
       type: object
