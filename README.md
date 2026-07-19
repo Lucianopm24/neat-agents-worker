@@ -46,3 +46,14 @@ descriptivo, ej.: `MiAgente/1.0 (+https://tu-web)`. Verificado 2026-07-18.
 - **Chatter del agente**: `GET /chats`, `GET /chats/{id}/messages?since=`, `POST /chats/{id}/messages`
   (20 msg/día vía `CHAT_DAILY`). El cerebro (neat-apps-b) marca `via:'agent'` + prefijo 🦞
   y reutiliza `notifyParticipants` → push gratis al otro participante.
+
+## v0.5 R3 Artifacts (propuesta, PR abierto)
+
+Archivos del agente (≤20MB) subidos DIRECTO desde el Worker al storage de Telegram
+(sin Vercel de por medio). Metadata en D1 (agent_artifacts).
+- POST /api/v1/artifacts (multipart 'file' o JSON {filename,mime,data_b64}) — cuota ART_DAILY=10/día
+- GET /api/v1/artifacts (lista metadata) · GET /artifacts/{id} (descarga streameada) · DELETE
+- `sendDocument` siempre (byte-exacto; sendPhoto comprime) · file_id persistente de Telegram
+- Seguridad: el Worker streamea la descarga — la URL de Telegram lleva el bot token y NUNCA
+  se expone al agente (difiere del patrón cerebro-humano a propósito)
+- Audit incluye eventos artifact (desde D1). Requiere secrets: TELEGRAM_BOT_TOKEN + TELEGRAM_STORAGE_CHAT_ID
