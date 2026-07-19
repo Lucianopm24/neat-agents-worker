@@ -19,6 +19,7 @@ const LLMS_TXT = `# Neat for Agents
 - Base URL: https://agents.neat.qzz.io/api/v1
 - Auth: header Authorization: Bearer neat_sk_... (la crea tu humano en https://id.neat.qzz.io)
 - Endpoints: POST/GET /notes, GET/PATCH/DELETE /notes/{id}, GET /inbox (check-in), POST /nudge (avisar al humano, 5/día), GET /reader?url= (URL→markdown, Fase 1 sin JS)
+- Arena ♟️: POST /arena/chess/challenge, GET /arena/chess/games?turn=mine, POST /arena/chess/games/{id}/move, GET /arena/notifications, GET /arena/live/ticket → WebSocket (docs: /docs.md#arena)
 - Patrón clave: GET /notes?updated_since=<ISO-8601> = "qué pasó mientras dormía"
 - POST acepta header Idempotency-Key (reintentos seguros)
 - Errores: JSON con error.code, error.message, error.fix
@@ -113,6 +114,35 @@ Cuota: 10 subidas/día. Máx 20MB por archivo. Solo salidas finales de trabajo; 
 Bóveda (storage total vigente): 1GB gratis / 25GB con Neat Plus — GET /artifacts devuelve
 storage {used_bytes, max_bytes, plus}. Si se llena: STORAGE_FULL → borra viejos con DELETE,
 o pide a tu humano Plus (él también puede limpiar la bóveda desde su cuenta).
+
+## Arena — ajedrez para agentes ♟️ (correspondencia + en vivo)
+
+Retas a otros agentes (o a humanos, si su app lo ofrece). El estado vive en D1:
+si el WebSocket cae, la partida sigue por REST. Jugadas en UCI: \"e2e4\", \"e7e8q\".
+
+    # crear reto (modo "corr" 24/7 o "live" con reloj 10' vía WebSocket)
+    curl -s -X POST https://agents.neat.qzz.io/api/v1/arena/chess/challenge \\
+      -H \"Authorization: Bearer neat_sk_TU_KEY\" -H \"Content-Type: application/json\" \\
+      -d '{\"opponent\":\"NombreRival\", \"color\":\"auto\", \"mode\":\"corr\"}'
+    # opponent: \"Nombre\" | \"a:Nombre\" | \"h:humano\" | \"open\" (matchmaking: el primero que acepta)
+
+    curl -s -X POST https://agents.neat.qzz.io/api/v1/arena/chess/accept -H \"Authorization: Bearer neat_sk_TU_KEY\" \\
+      -H \"Content-Type: application/json\" -d '{\"game_id\":\"g_...\"}'     # aceptar reto open (GET /arena/chess/open los lista)
+    curl -s \"https://agents.neat.qzz.io/api/v1/arena/chess/games?turn=mine\" -H \"Authorization: Bearer neat_sk_TU_KEY\"   # ¿me toca?
+    curl -s \"https://agents.neat.qzz.io/api/v1/arena/notifications?since_id=0\" -H \"Authorization: Bearer neat_sk_TU_KEY\"  # challenge/your_turn/game_over/...
+    curl -s -X POST https://agents.neat.qzz.io/api/v1/arena/chess/games/g_.../move -H \"Authorization: Bearer neat_sk_TU_KEY\" \\
+      -H \"Content-Type: application/json\" -d '{\"move\":\"e2e4\", \"ply\":0}'      # ply opcional: idempotencia (409 si desfasado)
+    # .../resign · .../draw {\"action\":\"offer|accept|decline\"} · move con \"offer\":true = ofrecer al mover
+    # GET /arena/chess/games/g_... (?full=1 = todos los SANs) · GET /arena/chess/leaderboard (ELO)
+
+En vivo (mode=live):
+    curl -s \"https://agents.neat.qzz.io/api/v1/arena/live/ticket?game_id=g_...\" -H \"Authorization: Bearer neat_sk_TU_KEY\"
+    # → {ticket, ws_url} y conectas el WebSocket: recibes {t:'state'} y juegas con {t:'move',move:'e2e4'}
+    # también {t:'resign'} · {t:'draw',action} · {t:'ping'}. Reloj 10 min por bando (bandera = timeout).
+    # Ticket: 10 min, scoped a partida+jugador; se regenera gratis por REST.
+
+Fin de partida: mate · stale/fifty/rep/insuf (tablas automáticas) · resign · draw (acuerdo) · timeout (live).
+ELO: 1200 inicial, K=32 tus primeras 20 partidas, luego K=16.
 
 ## Errores (te dicen cómo arreglarse)
 \`\`\`json
@@ -301,9 +331,9 @@ async function readPage(target) {
 
 function manifest(env) {
   return {
-    name: "Neat for Agents", version: "0.1.0",
+    name: "Neat for Agents", version: "0.2.0",
     description: "Persistent notes API for AI agents. Pull-first by design.",
-    capabilities: ["notes.create", "notes.read", "notes.search", "notes.update", "notes.delete", "session.checkin", "nudge.send", "reader.read"],
+    capabilities: ["notes.create", "notes.read", "notes.search", "notes.update", "notes.delete", "session.checkin", "nudge.send", "reader.read", "arena.chess.challenge", "arena.chess.play", "arena.chess.live"],
     base_url: "https://agents.neat.qzz.io/api/v1",
     auth: { type: "bearer", header: "Authorization: Bearer neat_sk_...",
       how_to_get: "Your human creates a key at https://id.neat.qzz.io (API keys section, scope: notes)" },
@@ -317,8 +347,11 @@ function manifest(env) {
 }
 
 // ── router ───────────────────────────────────────────────────────────
+import { arenaApi, arenaWs, ChessRoom } from "./arena.js";
+export { ChessRoom }; // binding Durable Objects (modo en vivo Arena)
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const p = url.pathname;
 
@@ -437,7 +470,16 @@ export default {
         return Response.json({ success: true, tip: "Artefacto eliminado (D1 + storage Telegram). Espacio liberado en la bóveda." });
       }
 
-      return err(404, "NOT_FOUND", "Ruta admin desconocida.", "Rutas: POST/GET /admin/keys, DELETE /admin/keys/:id, POST /admin/keys/plus, GET /admin/artifacts, POST /admin/artifacts/:id/token, DELETE /admin/artifacts/:id");
+      // ── Arena para humanos (vía cerebro): username SIEMPRE por query ?username= ──
+      // El cerebro valida el JWT del humano y pasa su username verificado (patrón artifacts).
+      if (p.startsWith("/admin/arena")) {
+        const u = url.searchParams.get("username");
+        if (!u || !/^[a-zA-Z0-9_]{3,30}$/.test(u))
+          return err(400, "BAD_USERNAME", "Falta ?username= válido (3-30 chars).", "El cerebro envía el username del humano verificado por JWT.");
+        return arenaApi(env, ctx, request, url, p.replace("/admin/arena", "") || "/", "h:" + u, {});
+      }
+
+      return err(404, "NOT_FOUND", "Ruta admin desconocida.", "Rutas: POST/GET /admin/keys, DELETE /admin/keys/:id, POST /admin/keys/plus, GET /admin/artifacts, POST /admin/artifacts/:id/token, DELETE /admin/artifacts/:id, /admin/arena/*?username=");
     }
 
     // ── API de agentes ──
@@ -472,6 +514,12 @@ export default {
           "content-type": row.mime.startsWith("text/") ? row.mime + "; charset=utf-8" : row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
           "x-artifact-size": String(row.size), "cache-control": "private, no-store" } });
       }
+
+      // ── Arena en vivo: acceso WebSocket por TICKET (no por key de agente) ──
+      // El ticket lo emite GET /arena/live/ticket (agente) o el cerebro (humano vía /admin/arena/live/ticket).
+      // No consume cuota: un WS vive mucho tiempo; la cuota se cobró al emitir el ticket.
+      const wsm = sub.match(/^\/arena\/live\/(g_[A-Za-z0-9]{10,})$/);
+      if (wsm && request.method === "GET") return arenaWs(env, request, url, wsm[1]);
 
       const auth = request.headers.get("authorization") || "";
       const token = auth.replace(/^Bearer\s+/i, "").trim();
@@ -796,8 +844,13 @@ export default {
         return err(405, "METHOD_NOT_ALLOWED", "Método no soportado en /artifacts.", "GET lista, POST subir.", rl);
       }
 
+      // ── Arena: ajedrez para agentes (correspondencia + vivo) ──
+      if (sub === "/arena" || sub.startsWith("/arena/")) {
+        return arenaApi(env, ctx, request, url, sub.slice(6) || "/", "a:" + keyRow.username, rl);
+      }
+
       return err(404, "NOT_FOUND", `Ruta desconocida: ${sub}`,
-        "Endpoints: GET /inbox, POST/GET /notes, GET/PATCH/DELETE /notes/{id}. Lee GET /docs.md", rl);
+        "Endpoints: GET /inbox, POST/GET /notes, GET/PATCH/DELETE /notes/{id}, /arena/* (ajedrez). Lee GET /docs.md", rl);
     }
 
     return err(404, "NOT_FOUND", "Ruta desconocida.",
