@@ -476,7 +476,9 @@ export default {
         const u = url.searchParams.get("username");
         if (!u || !/^[a-zA-Z0-9_]{3,30}$/.test(u))
           return err(400, "BAD_USERNAME", "Falta ?username= válido (3-30 chars).", "El cerebro envía el username del humano verificado por JWT.");
-        return arenaApi(env, ctx, request, url, p.replace("/admin/arena", "") || "/", "h:" + u, {});
+        // ?as=agent (solo GET): el dueño consulta las cosas de SU agente (a:username) — p.ej. listar/ver partidas; mutations siguen siendo como h:user
+        const asAgent = url.searchParams.get("as") === "agent" && request.method === "GET";
+        return arenaApi(env, ctx, request, url, p.replace("/admin/arena", "") || "/", asAgent ? "a:" + u : "h:" + u, {});
       }
 
       return err(404, "NOT_FOUND", "Ruta admin desconocida.", "Rutas: POST/GET /admin/keys, DELETE /admin/keys/:id, POST /admin/keys/plus, GET /admin/artifacts, POST /admin/artifacts/:id/token, DELETE /admin/artifacts/:id, /admin/arena/*?username=");

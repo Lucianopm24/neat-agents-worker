@@ -58,6 +58,22 @@ function eloNext(ra, ga, rb, gb, sa) {
 }
 
 // Vista pública de una partida (clocks calculados al vuelo para live).
+// ── Ligas Arena: arrancas en 1200 (Plata); sube con cada partida ─────
+const LEAGUES = [
+  { min: 2000, name: "Leyenda", icon: "👑" },
+  { min: 1800, name: "Diamante", icon: "💠" },
+  { min: 1600, name: "Platino", icon: "🟦" },
+  { min: 1400, name: "Oro", icon: "🥇" },
+  { min: 1200, name: "Plata", icon: "🥈" },
+  { min: 0, name: "Bronce", icon: "🥉" },
+];
+function leagueFromElo(rating) {
+  const l = LEAGUES.find((x) => rating >= x.min);
+  const i = LEAGUES.indexOf(l);
+  const nxt = i > 0 ? LEAGUES[i - 1] : null;
+  return { league: l.name, icon: l.icon, next: nxt ? { league: nxt.name, at: nxt.min } : null };
+}
+
 function gameView(row, nowMs = Date.now(), fullSans = false) {
   const sans = JSON.parse(row.sans || "[]");
   const turn = row.fen.split(" ")[1];
@@ -286,21 +302,23 @@ function pokeRoom(env, ctx, gameId) {
 // ── tickets WebSocket (HMAC scoped: partida+jugador+exp, 10 min) ────
 const b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64url = (s) => decodeURIComponent(escape(atob(s.replace(/-/g, "+").replace(/_/g, "/"))));
-async function mintTicket(env, gameId, playerId) {
+async function mintTicket(env, gameId, playerId, role = "play") {
   const exp = Math.floor(Date.now() / 1000) + 600;
-  const h = await hmacHex(env.NEAT_INTERNAL_SECRET, `arena:${gameId}:${playerId}:${exp}`);
-  return { ticket: `${b64url(playerId)}.${exp}.${h}`, expires_in: 600 };
+  const rl = role === "spectate" ? "s" : "p";
+  const h = await hmacHex(env.NEAT_INTERNAL_SECRET, `arena:${gameId}:${playerId}:${rl}:${exp}`);
+  return { ticket: `${b64url(playerId)}.${rl}.${exp}.${h}`, expires_in: 600 };
 }
 async function verifyTicket(env, gameId, ticket) {
   const parts = (ticket || "").split(".");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 4) return null;
   let playerId;
   try { playerId = unb64url(parts[0]); } catch { return null; }
-  const exp = parseInt(parts[1], 10);
-  if (!PLAYER_RE.test(playerId) || !exp || Date.now() > exp * 1000) return null;
-  const want = await hmacHex(env.NEAT_INTERNAL_SECRET, `arena:${gameId}:${playerId}:${exp}`);
-  if (want !== parts[2]) return null;
-  return { playerId, exp };
+  const role = parts[1] === "s" ? "spectate" : parts[1] === "p" ? "play" : null;
+  const exp = parseInt(parts[2], 10);
+  if (!PLAYER_RE.test(playerId) || !role || !exp || Date.now() > exp * 1000) return null;
+  const want = await hmacHex(env.NEAT_INTERNAL_SECRET, `arena:${gameId}:${playerId}:${parts[1]}:${exp}`);
+  if (want !== parts[3]) return null;
+  return { playerId, role, exp };
 }
 
 // ── ejecución compartida de acciones (usada por REST y por el DO) ──
@@ -383,7 +401,7 @@ export async function arenaApi(env, ctx, request, url, sub, playerId, rl = {}) {
   if (m(/^\/chess\/leaderboard$/) && request.method === "GET") {
     const limit = Math.min(100, parseInt(url.searchParams.get("limit") || "20", 10) || 20);
     const { results } = await env.DB.prepare("SELECT * FROM arena_elo WHERE games > 0 ORDER BY rating DESC LIMIT ?").bind(limit).all();
-    return Response.json({ success: true, data: { leaderboard: results.map((r, i) => ({ rank: i + 1, ...r })) } }, { headers: rl });
+    return Response.json({ success: true, data: { leaderboard: results.map((r, i) => ({ rank: i + 1, ...r, ...leagueFromElo(r.rating) })) } }, { headers: rl });
   }
 
   // GET /notifications?since_id=0 — bandeja de eventos del jugador
@@ -400,13 +418,18 @@ export async function arenaApi(env, ctx, request, url, sub, playerId, rl = {}) {
     if (!GID_RE.test(gid)) return errA(400, "BAD_GAME_ID", "game_id inválido.", "?game_id=g_...", rl);
     const row = await arenaLoadGame(env, gid);
     if (!row) return errA(404, "GAME_NOT_FOUND", "Partida no encontrada.", "Verifica el game_id.", rl);
-    const side = sideOf(row, playerId);
-    if (!side) return errA(403, "NOT_YOUR_GAME", "No juegas esa partida.", "Solo los jugadores entran al vivo (espectadores: roadmap).", rl);
+    let side = sideOf(row, playerId), role = "play";
+    if (!side && playerId.startsWith("h:")) {
+      // modo espectador: el dueño puede VER la partida en vivo de SU agente (solo lectura)
+      const agentOf = "a:" + playerId.slice(2);
+      if (row.white === agentOf || row.black === agentOf) { side = "spec"; role = "spectate"; }
+    }
+    if (!side) return errA(403, "NOT_YOUR_GAME", "No juegas esa partida.", "Solo los jugadores entran al vivo — o el dueño de un agente que juega (espectador).", rl);
     if (row.status !== "active") return errA(409, "GAME_NOT_ACTIVE", "La partida no está activa.", "El vivo es para partidas en curso.", rl);
-    const { ticket, expires_in } = await mintTicket(env, gid, playerId);
+    const { ticket, expires_in } = await mintTicket(env, gid, playerId, role);
     const ws = `wss://${url.host}/api/v1/arena/live/${gid}?ticket=${encodeURIComponent(ticket)}`;
-    return Response.json({ success: true, data: { ticket, ws_url: ws, expires_in, side,
-      tip: "Conecta, recibes {t:'state'} y juegas con {t:'move',move:'e2e4'}. Si el WS cae, la partida sigue viva por REST." } }, { headers: rl });
+    return Response.json({ success: true, data: { ticket, ws_url: ws, expires_in, side, spectate: role === "spectate",
+      tip: role === "spectate" ? "Modo espectador: recibes {t:'state'} en vivo pero no puedes mover." : "Conecta, recibes {t:'state'} y juegas con {t:'move',move:'e2e4'}. Si el WS cae, la partida sigue viva por REST." } }, { headers: rl });
   }
 
   // GET /chess/games/{id} (+ POST move|resign|draw)
@@ -456,13 +479,15 @@ export async function arenaWs(env, request, url, gameId, rl = {}) {
   const row = await arenaLoadGame(env, gameId);
   if (!row) return errA(404, "GAME_NOT_FOUND", "Partida no encontrada.", "Verifica el game_id.", rl);
   if (row.status !== "active") return errA(409, "GAME_NOT_ACTIVE", "La partida no está activa.", "El vivo es para partidas en curso.", rl);
-  const side = sideOf(row, t.playerId);
-  if (!side) return errA(403, "NOT_YOUR_GAME", "No juegas esta partida.", "Solo los jugadores (espectadores: roadmap).", rl);
+  let side = sideOf(row, t.playerId);
+  if (!side && t.role === "spectate") side = "spec";
+  if (!side) return errA(403, "NOT_YOUR_GAME", "No juegas esta partida.", "Solo los jugadores — o su dueño en modo espectador.", rl);
   if ((request.headers.get("upgrade") || "").toLowerCase() !== "websocket")
     return errA(426, "UPGRADE_REQUIRED", "Esta ruta es WebSocket.", `Conecta con ${url.protocol === "https:" ? "wss" : "ws"}:// y el ticket en la query.`, rl);
   const req = new Request(request);
   req.headers.set("x-arena-player", t.playerId);
   req.headers.set("x-arena-side", side);
+  req.headers.set("x-arena-role", t.role || "play");
   const stub = env.ARENA_ROOM.get(env.ARENA_ROOM.idFromName(gameId));
   return stub.fetch(req);
 }
@@ -488,6 +513,7 @@ export class ChessRoom {
       return new Response("expected websocket", { status: 426 });
     const playerId = request.headers.get("x-arena-player");
     const side = request.headers.get("x-arena-side");
+    const role = request.headers.get("x-arena-role") || "play";
     const gameId = url.pathname.split("/").pop();
     if (!playerId || !side || !GID_RE.test(gameId || ""))
       return new Response("bad arena session", { status: 400 });
@@ -497,8 +523,8 @@ export class ChessRoom {
     }
     const pair = new WebSocketPair();
     this.state.acceptWebSocket(pair[1], [playerId]);
-    pair[1].serializeAttachment({ playerId, side });
-    pair[1].send(JSON.stringify({ t: "hello", player: playerId, side }));
+    pair[1].serializeAttachment({ playerId, side, spectate: role === "spectate" });
+    pair[1].send(JSON.stringify({ t: "hello", player: playerId, side, spectate: role === "spectate" }));
     await this.sendState(pair[1]);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
@@ -532,6 +558,10 @@ export class ChessRoom {
     const att = ws.deserializeAttachment() || {};
     const playerId = att.playerId;
     if (!playerId) return ws.send(JSON.stringify({ t: "err", code: "NO_SESSION", message: "Sesión sin identidad (reconecta)." }));
+    if (att.spectate) {
+      if (msg.t === "ping") { await this.sendState(ws); return; }
+      return ws.send(JSON.stringify({ t: "err", code: "SPECTATOR", message: "Modo espectador: solo lectura (no mueves, no te rindes, no ofreces tablas)." }));
+    }
     if (msg.t === "ping") { await this.sendState(ws); return; }
 
     const row = await this.loadRow();
