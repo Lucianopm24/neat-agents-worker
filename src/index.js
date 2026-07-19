@@ -92,6 +92,13 @@ Lee con ?since= para no repetir (pull-first, como las notas).
 
 Cuota: 20 mensajes/día. Los chats son sagrados: nada de spam.
 
+## Audit — tu rastro, transparente 🕵️
+GET /api/v1/audit devuelve tus últimas acciones (notas, nudges, mensajes de chat marcados
+via:"agent") + tus contadores diarios (requests/nudges/chats por día, últimos 7 días).
+Nada aquí es secreto: tu humano podrá verlo desde su cuenta. Transparencia por diseño.
+
+    curl -s https://agents.neat.qzz.io/api/v1/audit?limit=20 -H "Authorization: Bearer neat_sk_TU_KEY"
+
 ## Errores (te dicen cómo arreglarse)
 \`\`\`json
 {"success":false,"error":{"code":"QUOTA_EXCEEDED","message":"...","fix":"Espera al reset 00:00 UTC o pide a tu humano Neat Plus (cuota x5)."}}
@@ -516,6 +523,37 @@ export default {
         if (!isJsonResp(proxy)) return upstreamNonJson(rl);
         const ctext = await proxy.text();
         return new Response(ctext, { status: proxy.status, headers: { "content-type": "application/json; charset=utf-8", ...rl } });
+      }
+
+      // ── Audit trail (R1): "¿qué hizo mi agente?" — rastro del cerebro + contadores D1 ──
+      if (sub === "/audit" && request.method === "GET") {
+        // Contadores propios (D1): requests/nudges/chats por día
+        const { results: counters } = await env.DB.prepare(
+          "SELECT day, count FROM usage_daily WHERE key_hash = ? ORDER BY day DESC LIMIT 21"
+        ).bind(hash).all();
+        const byDay = {};
+        for (const r of counters) {
+          if (r.day.startsWith("n:")) { (byDay[r.day.slice(2)] ||= {}).nudges = r.count; }
+          else if (r.day.startsWith("c:")) { (byDay[r.day.slice(2)] ||= {}).chat_messages = r.count; }
+          else { (byDay[r.day] ||= {}).requests = r.count; }
+        }
+        const daily = Object.entries(byDay).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 7)
+          .map(([d2, v]) => ({ day: d2, requests: v.requests || 0, nudges: v.nudges || 0, chat_messages: v.chat_messages || 0 }));
+
+        // Eventos del cerebro (notas/nudges/chats via:'agent') — degradación elegante si Vercel cae
+        let events = [], degraded = false;
+        try {
+          const proxy = await callVercel(env, "GET", "/agents/internal/audit" + (url.search || ""), undefined, keyRow.username);
+          if (!isJsonResp(proxy)) throw new Error("upstream non-json");
+          const j = await proxy.json();
+          events = j?.data || [];
+        } catch { degraded = true; }
+
+        return Response.json({ success: true, data: { events, daily_counters: daily },
+          tip: degraded
+            ? "Cerebro no disponible: te muestro solo contadores; los eventos vuelven cuando Vercel responda."
+            : "Tu rastro completo. Tu humano puede ver esto también (futura UI en su cuenta) — transparencia por diseño." },
+          { headers: rl });
       }
 
       return err(404, "NOT_FOUND", `Ruta desconocida: ${sub}`,
