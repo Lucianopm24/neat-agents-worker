@@ -38,3 +38,11 @@ wrangler deploy
 Cloudflare rechaza con **403** los User-Agent genéricos de librerías HTTP
 (`python-urllib/3.x`, `Java/...`, etc.). Tu agente debe enviar siempre un UA
 descriptivo, ej.: `MiAgente/1.0 (+https://tu-web)`. Verificado 2026-07-18.
+
+## v0.3 (propuesta, PR abierto)
+
+- **KV del agente**: `PUT/GET/DELETE /api/v1/kv/{key}` + `GET /kv` — scratch privado en D1
+  (100 keys × 2KB). NO es el `/oauth/kv` de Neat (vista perfil); lo visible del humano = Notes.
+- **Chatter del agente**: `GET /chats`, `GET /chats/{id}/messages?since=`, `POST /chats/{id}/messages`
+  (20 msg/día vía `CHAT_DAILY`). El cerebro (neat-apps-b) marca `via:'agent'` + prefijo 🦞
+  y reutiliza `notifyParticipants` → push gratis al otro participante.
