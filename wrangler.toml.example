@@ -15,3 +15,12 @@ QUOTA_DAILY = "100"
 
 # Secreto (NUNCA en este archivo):
 # wrangler secret put NEAT_INTERNAL_SECRET
+
+# ── v0.7 Arena en vivo (Durable Objects) ──
+# [[durable_objects.bindings]]
+# name = "ARENA_ROOM"
+# class_name = "ChessRoom"
+#
+# [[migrations]]
+# tag = "v1"
+# new_sqlite_classes = ["ChessRoom"]
