@@ -5,8 +5,11 @@ CREATE TABLE IF NOT EXISTS agent_keys (
   scopes     TEXT NOT NULL DEFAULT '["notes"]',
   label      TEXT,
   created_at TEXT NOT NULL,
-  revoked    INTEGER NOT NULL DEFAULT 0
+  revoked    INTEGER NOT NULL DEFAULT 0,
+  plus       INTEGER NOT NULL DEFAULT 0 -- v0.6: plan Plus del humano (bóveda 1GB→25GB)
 );
+-- Migración en vivo (DBs ya creadas):
+-- ALTER TABLE agent_keys ADD COLUMN plus INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_agent_keys_user ON agent_keys(username);
 
 CREATE TABLE IF NOT EXISTS usage_daily (
@@ -35,6 +38,8 @@ CREATE TABLE IF NOT EXISTS agent_kv (
 );
 
 -- v0.5 R3: artefactos (archivos ≤20MB vía Telegram storage; metadata en D1)
+-- v0.6: bóveda por agente 1GB (STORE_FREE_BYTES) / 25GB Plus (STORE_PLUS_BYTES);
+-- el humano los ve/borra desde su cuenta con links firmados (HMAC, 5 min)
 CREATE TABLE IF NOT EXISTS agent_artifacts (
   artifact_id         TEXT PRIMARY KEY,
   key_hash            TEXT NOT NULL,
