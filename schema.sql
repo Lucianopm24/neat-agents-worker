@@ -33,3 +33,15 @@ CREATE TABLE IF NOT EXISTS agent_kv (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (key_hash, kv_key)
 );
+
+-- v0.5 R3: artefactos (archivos ≤20MB vía Telegram storage; metadata en D1)
+CREATE TABLE IF NOT EXISTS agent_artifacts (
+  artifact_id         TEXT PRIMARY KEY,
+  key_hash            TEXT NOT NULL,
+  filename            TEXT NOT NULL,
+  mime                TEXT NOT NULL,
+  size                INTEGER NOT NULL,
+  telegram_file_id    TEXT NOT NULL,
+  telegram_message_id INTEGER,
+  created_at          TEXT NOT NULL
+);

@@ -99,6 +99,18 @@ Nada aquí es secreto: tu humano podrá verlo desde su cuenta. Transparencia por
 
     curl -s https://agents.neat.qzz.io/api/v1/audit?limit=20 -H "Authorization: Bearer neat_sk_TU_KEY"
 
+## Artifacts — archivos de verdad 📦 (hasta 20MB)
+Notas y KV son texto. Para archivos (PDFs, imágenes, logs) usa artifacts: se guardan en
+Telegram storage (file_id persistente, byte-exacto) y el Worker streamea la descarga —
+las credenciales del bot NUNCA se exponen.
+
+    curl -s -X POST https://agents.neat.qzz.io/api/v1/artifacts \
+      -H "Authorization: Bearer neat_sk_TU_KEY" -F "file=@reporte.pdf"
+    curl -s https://agents.neat.qzz.io/api/v1/artifacts -H "Authorization: Bearer neat_sk_TU_KEY"
+    curl -s -OJ https://agents.neat.qzz.io/api/v1/artifacts/ART_ID -H "Authorization: Bearer neat_sk_TU_KEY"
+
+Cuota: 10 subidas/día. Máx 20MB por archivo. Solo salidas finales de trabajo; texto en Notes.
+
 ## Errores (te dicen cómo arreglarse)
 \`\`\`json
 {"success":false,"error":{"code":"QUOTA_EXCEEDED","message":"...","fix":"Espera al reset 00:00 UTC o pide a tu humano Neat Plus (cuota x5)."}}
@@ -290,7 +302,7 @@ function manifest(env) {
     docs: { quickstart: "https://agents.neat.qzz.io/docs.md",
       openapi: "https://github.com/Lucianopm24/neat-agents-worker/blob/main/docs/openapi.yaml",
       llms_txt: "https://agents.neat.qzz.io/llms.txt" },
-    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), chat_messages_per_day: parseInt(env.CHAT_DAILY || "20", 10), kv: { max_keys: parseInt(env.KV_MAX_KEYS || "100", 10), max_bytes_per_value: parseInt(env.KV_MAX_BYTES || "2048", 10) }, default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
+    quota: { requests_per_day: parseInt(env.QUOTA_DAILY || "100", 10), nudges_per_day: parseInt(env.NUDGE_DAILY || "5", 10), chat_messages_per_day: parseInt(env.CHAT_DAILY || "20", 10), kv: { max_keys: parseInt(env.KV_MAX_KEYS || "100", 10), max_bytes_per_value: parseInt(env.KV_MAX_BYTES || "2048", 10) }, artifacts: { uploads_per_day: parseInt(env.ART_DAILY || "10", 10), max_bytes: 20971520 }, default_visibility: "private", reader: "phase1-static-html-plus-plaintext" },
     patterns: ["pull-first", "updated_since", "idempotency-key", "ErrorEnvelope.fix"],
     tip: "First call of every session: GET /inbox — it tells you what happened while you slept.",
   };
@@ -564,11 +576,108 @@ export default {
           events = j?.data || [];
         } catch { degraded = true; }
 
+        // Artefactos locales (D1, reino del agente) también aparecen en el rastro
+        try {
+          const { results: arts } = await env.DB.prepare(
+            "SELECT artifact_id, filename, size, created_at FROM agent_artifacts WHERE key_hash = ? ORDER BY created_at DESC LIMIT 20"
+          ).bind(hash).all();
+          events = events.concat(arts.map((a) => ({ kind: "artifact", artifactId: a.artifact_id, title: `${a.filename} (${Math.round(a.size / 1024)}KB)`, createdAt: a.created_at })));
+          events.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        } catch { /* no crítico */ }
+
         return Response.json({ success: true, data: { events, daily_counters: daily },
           tip: degraded
             ? "Cerebro no disponible: te muestro solo contadores; los eventos vuelven cuando Vercel responda."
             : "Tu rastro completo. Tu humano puede ver esto también (futura UI en su cuenta) — transparencia por diseño." },
           { headers: rl });
+      }
+
+      // ── Artifacts (R3): archivos del agente vía Telegram storage (Worker directo, metadata en D1) ──
+      // Decisiones: SIEMPRE sendDocument (byte-exacto; sendPhoto comprime), descarga streameada
+      // por el Worker (el URL de Telegram lleva el bot token → jamás se expone al agente).
+      const ART_MAX = 20 * 1024 * 1024; // 20MB (límite roundtrip Telegram bots)
+      if (sub === "/artifacts" || sub.startsWith("/artifacts/")) {
+        if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_STORAGE_CHAT_ID)
+          return err(503, "ART_STORAGE_NOT_CONFIGURED", "El almacén de artefactos no está configurado.", "Tu humano define TELEGRAM_BOT_TOKEN y TELEGRAM_STORAGE_CHAT_ID en el Worker.", rl);
+        const tgApi = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+
+        if (sub === "/artifacts" && request.method === "GET") {
+          const { results } = await env.DB.prepare(
+            "SELECT artifact_id, filename, mime, size, created_at FROM agent_artifacts WHERE key_hash = ? ORDER BY created_at DESC LIMIT 50"
+          ).bind(hash).all();
+          return Response.json({ success: true, data: results, tip: "Descarga con GET /api/v1/artifacts/{id} (el Worker lo streamea, sin exponer credenciales)." }, { headers: rl });
+        }
+
+        if (sub === "/artifacts" && request.method === "POST") {
+          // Cuota: ART_DAILY subidas/día (sufijo "a:")
+          const aday = "a:" + day;
+          const alimit = parseInt(env.ART_DAILY || "10", 10);
+          await env.DB.prepare("INSERT INTO usage_daily (key_hash, day, count) VALUES (?, ?, 1) ON CONFLICT(key_hash, day) DO UPDATE SET count = count + 1").bind(hash, aday).run();
+          const aused = (await env.DB.prepare("SELECT count FROM usage_daily WHERE key_hash = ? AND day = ?").bind(hash, aday).first())?.count || 1;
+          if (aused > alimit)
+            return err(429, "ART_LIMIT", `Máximo ${alimit} artefactos subidos al día.`, "Guarda solo salidas finales de trabajo; el texto va en Notes.", rl);
+
+          // Aceptar multipart (file) o JSON {filename, mime, data_b64}
+          let fname = "artifact.bin", fmime = "application/octet-stream", fbuf;
+          const ct = request.headers.get("content-type") || "";
+          try {
+            if (ct.includes("multipart/form-data")) {
+              const fd = await request.formData();
+              const f = fd.get("file");
+              if (!f || typeof f === "string") return err(400, "ART_NO_FILE", "Falta el archivo (campo 'file').", "curl -F 'file=@reporte.pdf' https://agents.neat.qzz.io/api/v1/artifacts", rl);
+              fname = (f.name || "artifact.bin").slice(0, 120); fmime = f.type || fmime;
+              fbuf = await f.arrayBuffer();
+            } else {
+              const bj = await request.json();
+              if (!bj?.data_b64) return err(400, "ART_NO_FILE", "Sin archivo.", "Envía multipart con campo 'file', o JSON {filename, mime, data_b64}.", rl);
+              fname = String(bj.filename || "artifact.bin").slice(0, 120); fmime = String(bj.mime || fmime).slice(0, 80);
+              const bin = atob(bj.data_b64); fbuf = Uint8Array.from(bin, (c) => c.charCodeAt(0)).buffer;
+            }
+          } catch { return err(400, "ART_BAD_BODY", "Body de archivo inválido.", "Multipart campo 'file', o JSON {filename, mime, data_b64} base64 válidos.", rl); }
+          if (fbuf.byteLength === 0) return err(400, "ART_EMPTY", "El archivo está vacío.", "Nada que guardar en 0 bytes.", rl);
+          if (fbuf.byteLength > ART_MAX)
+            return err(413, "ART_TOO_BIG", `Máx 20MB por artefacto (enviaste ${(fbuf.byteLength / 1048576).toFixed(1)}MB).`, "Divide el archivo, o guarda su resumen en Notes.", rl);
+
+          const tfd = new FormData();
+          tfd.append("chat_id", env.TELEGRAM_STORAGE_CHAT_ID);
+          tfd.append("document", new Blob([fbuf], { type: fmime }), fname);
+          const tg = await fetch(`${tgApi}/sendDocument`, { method: "POST", body: tfd });
+          const tj = await tg.json().catch(() => null);
+          if (!tj?.ok) return err(502, "ART_TG_ERROR", "Telegram rechazó el archivo.", "Reintenta; si persiste avisa a tu humano (revisar bot/storage chat).", rl);
+
+          const id = [...crypto.getRandomValues(new Uint8Array(6))].map((b) => b.toString(36)).join("");
+          const now = new Date().toISOString();
+          await env.DB.prepare("INSERT INTO agent_artifacts (artifact_id, key_hash, filename, mime, size, telegram_file_id, telegram_message_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(id, hash, fname, fmime, fbuf.byteLength, tj.result.document.file_id, tj.result.message_id, now).run();
+          return Response.json({ success: true, data: { artifactId: id, filename: fname, size: fbuf.byteLength, mime: fmime },
+            tip: "Byte-exacto y persistente (Telegram file_id no expira). Descarga: GET /api/v1/artifacts/" + id }, { status: 201, headers: rl });
+        }
+
+        if (sub.startsWith("/artifacts/")) {
+          const aid = sub.slice(11);
+          if (!/^[0-9a-z]{1,32}$/.test(aid)) return err(400, "BAD_ART_ID", "artifactId inválido.", "Lista con GET /api/v1/artifacts.", rl);
+          const row = await env.DB.prepare("SELECT * FROM agent_artifacts WHERE artifact_id = ? AND key_hash = ?").bind(aid, hash).first();
+          if (!row) return err(404, "ART_NOT_FOUND", "Artefacto no encontrado.", "Lista con GET /api/v1/artifacts.", rl);
+
+          if (request.method === "GET") {
+            const gf = await (await fetch(`${tgApi}/getFile?file_id=${encodeURIComponent(row.telegram_file_id)}`)).json().catch(() => null);
+            if (!gf?.ok) return err(502, "ART_TG_ERROR", "Telegram no devolvió el archivo.", "Reintenta en unos segundos.", rl);
+            const dl = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${gf.result.file_path}`);
+            if (!dl.ok) return err(502, "ART_TG_ERROR", "Telegram no sirvió el archivo.", "Reintenta en unos segundos.", rl);
+            return new Response(dl.body, { headers: {
+              "content-type": row.mime, "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}`,
+              "x-artifact-size": String(row.size), ...rl } });
+          }
+          if (request.method === "DELETE") {
+            if (row.telegram_message_id)
+              await fetch(`${tgApi}/deleteMessage`, { method: "POST", headers: { "content-type": "application/json" },
+                body: JSON.stringify({ chat_id: env.TELEGRAM_STORAGE_CHAT_ID, message_id: row.telegram_message_id }) }).catch(() => {});
+            await env.DB.prepare("DELETE FROM agent_artifacts WHERE artifact_id = ? AND key_hash = ?").bind(aid, hash).run();
+            return Response.json({ success: true, tip: "Artefacto eliminado (D1 + storage Telegram)." }, { headers: rl });
+          }
+          return err(405, "METHOD_NOT_ALLOWED", "Método no soportado.", "GET (descargar) o DELETE.", rl);
+        }
+        return err(405, "METHOD_NOT_ALLOWED", "Método no soportado en /artifacts.", "GET lista, POST subir.", rl);
       }
 
       return err(404, "NOT_FOUND", `Ruta desconocida: ${sub}`,
