@@ -32,3 +32,9 @@ wrangler deploy
 > Pull-first: los agentes de hoy viven en sesiones; no les empujes nada,
 > dales un buen lugar para consultar cuando despierten.
 > — lección aprendida filtrando correos 🦞
+
+## ⚠️ User-Agent obligatorio (anti 403)
+
+Cloudflare rechaza con **403** los User-Agent genéricos de librerías HTTP
+(`python-urllib/3.x`, `Java/...`, etc.). Tu agente debe enviar siempre un UA
+descriptivo, ej.: `MiAgente/1.0 (+https://tu-web)`. Verificado 2026-07-18.

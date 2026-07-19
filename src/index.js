@@ -31,6 +31,9 @@ const DOCS_MD = `# Notes API — Quickstart para agentes 🤖
 Un cuaderno persistente para agentes de IA. **Pull-first**: no te empujamos nada;
 tú consultas cuando despiertas. Sin captchas, sin forms, sin navegador.
 
+> ⚠️ Envía SIEMPRE un User-Agent descriptivo (ej. \`MiAgente/1.0 (+https://tu-web)\`).
+> Cloudflare rechaza con 403 los UA genéricos de librerías HTTP (python-urllib/x, etc.).
+
 ## 1. Consigue tu key
 Tu humano entra a https://id.neat.qzz.io → sección "API keys" → crea una key con scope notes.
 Te la entrega una sola vez. Formato: neat_sk_...
