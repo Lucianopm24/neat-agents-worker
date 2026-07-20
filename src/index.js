@@ -348,7 +348,9 @@ function manifest(env) {
 
 // ── router ───────────────────────────────────────────────────────────
 import { arenaApi, arenaWs, ChessRoom } from "./arena.js";
+import { snakeApi, snakeWs, SnakeRoom } from "./snake.js";
 export { ChessRoom }; // binding Durable Objects (modo en vivo Arena)
+export { SnakeRoom }; // binding Durable Objects (Snake Royale Arena 🐍)
 
 export default {
   async fetch(request, env, ctx) {
@@ -478,7 +480,9 @@ export default {
           return err(400, "BAD_USERNAME", "Falta ?username= válido (3-30 chars).", "El cerebro envía el username del humano verificado por JWT.");
         // ?as=agent (solo GET): el dueño consulta las cosas de SU agente (a:username) — p.ej. listar/ver partidas; mutations siguen siendo como h:user
         const asAgent = url.searchParams.get("as") === "agent" && request.method === "GET";
-        return arenaApi(env, ctx, request, url, p.replace("/admin/arena", "") || "/", asAgent ? "a:" + u : "h:" + u, {});
+        const arest = p.replace("/admin/arena", "") || "/";
+        if (arest.startsWith("/snake")) return snakeApi(env, ctx, request, url, arest.slice(6) || "/", asAgent ? "a:" + u : "h:" + u, {});
+        return arenaApi(env, ctx, request, url, arest, asAgent ? "a:" + u : "h:" + u, {});
       }
 
       return err(404, "NOT_FOUND", "Ruta admin desconocida.", "Rutas: POST/GET /admin/keys, DELETE /admin/keys/:id, POST /admin/keys/plus, GET /admin/artifacts, POST /admin/artifacts/:id/token, DELETE /admin/artifacts/:id, /admin/arena/*?username=");
@@ -522,6 +526,9 @@ export default {
       // No consume cuota: un WS vive mucho tiempo; la cuota se cobró al emitir el ticket.
       const wsm = sub.match(/^\/arena\/live\/(g_[A-Za-z0-9]{10,})$/);
       if (wsm && request.method === "GET") return arenaWs(env, request, url, wsm[1]);
+      // Snake Royale 🐍: WS por ticket (no consume cuota — se cobró al emitir el ticket)
+      const wss = sub.match(/^\/arena\/snake\/live\/(g_[A-Za-z0-9]{9,})$/);
+      if (wss && request.method === "GET") return snakeWs(env, request, url, wss[1]);
 
       const auth = request.headers.get("authorization") || "";
       const token = auth.replace(/^Bearer\s+/i, "").trim();
@@ -848,7 +855,9 @@ export default {
 
       // ── Arena: ajedrez para agentes (correspondencia + vivo) ──
       if (sub === "/arena" || sub.startsWith("/arena/")) {
-        return arenaApi(env, ctx, request, url, sub.slice(6) || "/", "a:" + keyRow.username, rl);
+        const arest = sub.slice(6) || "/";
+        if (arest.startsWith("/snake")) return snakeApi(env, ctx, request, url, arest.slice(6) || "/", "a:" + keyRow.username, rl);
+        return arenaApi(env, ctx, request, url, arest, "a:" + keyRow.username, rl);
       }
 
       return err(404, "NOT_FOUND", `Ruta desconocida: ${sub}`,
