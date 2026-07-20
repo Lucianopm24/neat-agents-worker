@@ -261,6 +261,25 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     return errA(405, "METHOD_NOT_ALLOWED", "Método no soportado.", "GET estado · POST join.");
   }
 
+  // POST /join-code {code} → unirse a una privada SOLO con su código (agentes y humanos)
+  if (sub === "/join-code" && request.method === "POST") {
+    const body = await request.json().catch(() => ({}));
+    const code = String(body?.code || "").toUpperCase().trim();
+    if (!/^[A-Z0-9]{6}$/.test(code)) return errA(400, "BAD_CODE", 'Envía {"code":"XK4P9Q"} (6 chars).', "El código lo tiene quien creó la mesa.");
+    const row = await env.DB.prepare("SELECT * FROM snake_games WHERE code=? AND status='starting' ORDER BY created_at DESC LIMIT 1").bind(code).first();
+    if (!row) return errA(404, "NOT_OPEN", "Ninguna mesa abierta con ese código.", "El código caduca al arrancar: pide uno nuevo o usa POST /queue.");
+    const seats = JSON.parse(row.seats_json);
+    if (seats.find((x) => x.id === playerId))
+      return Response.json({ success: true, data: { game: gameViewLite(row), tip: "Ya estabas sentado 🐍" } }, { headers: rl });
+    if (seats.length >= row.size) return errA(409, "TABLE_FULL", "Esa mesa ya está llena.", "Crea otra o entra a la cola pública.");
+    seats.push({ id: playerId });
+    await env.DB.prepare("UPDATE snake_games SET seats_json=? WHERE game_id=?").bind(JSON.stringify(seats), row.game_id).run();
+    const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(row.game_id));
+    ctx.waitUntil(stub.fetch("https://do/seat", { method: "POST", body: JSON.stringify({ player: playerId }) }));
+    for (const x of seats) if (x.id !== playerId && !x.id.startsWith("ai:")) await notify(env, x.id, "snake_seat", { game_id: row.game_id, by: playerId });
+    return Response.json({ success: true, data: { game: gameViewLite({ ...row, seats_json: JSON.stringify(seats) }), tip: "¡Sentado por código! 🐍 Ticket: GET /arena/snake/ticket?game_id= y conecta." } }, { headers: rl });
+  }
+
   // POST /queue {size} → únete a waiting reciente o crea una
   if (sub === "/queue" && request.method === "POST") {
     const body = await request.json().catch(() => ({}));
@@ -326,7 +345,7 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
   }
 
   return errA(404, "SNAKE_NOT_FOUND", `Ruta Snake desconocida: ${sub}`,
-    "Endpoints: POST /games (crear) · POST /queue · GET /games · GET /games/{id} · POST /games/{id}/join {code} · GET /leaderboard · GET /ticket?game_id=");
+    "Endpoints: POST /games · POST /join-code {code} · POST /queue · GET /games · GET /games/{id} · POST /games/{id}/join {code} · GET /leaderboard · GET /ticket?game_id=");
 }
 
 // ════════════════ WS access (module-scope, verifica ticket) ════════════════
