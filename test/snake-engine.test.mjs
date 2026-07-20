@@ -134,5 +134,34 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
   t("duelo de IAs termina dentro del cap", G.status === "finished" && G.tick <= 200);
 }
 
+
+// ── Revive (anti-hibernación): reconstruir desde transcript reproduce el estado exacto ──
+{
+  const ids = ["a:X", "ai:casa1", "h:Y", "ai:casa2"];
+  const seed = "revive-test-s1";
+  const dirsOf = (G) => { const d = new Map(); for (const id of ids) d.set(id, aiDir(G, id)); return d; };
+  const live = createGame(ids, { seed });
+  while (live.status === "active" && live.tick < 60) applyTick(live, dirsOf(live));
+  // replay estilo DO.revive: dirs de vivas en orden primero, luego "_" de las ya muertas
+  const CH = { u: "up", d: "down", l: "left", r: "right" };
+  const re = createGame(ids, { seed });
+  let p = 0, corrupt = false;
+  while (re.status === "active" && re.tick < live.tick) {
+    const aliveNow = re.snakes.filter((s) => s.alive);
+    const m = new Map();
+    for (const s of aliveNow) { const ch = live.transcript[p++]; if (!CH[ch]) { corrupt = true; break; } m.set(s.id, CH[ch]); }
+    p += ids.length - aliveNow.length;
+    if (corrupt) break;
+    applyTick(re, m);
+  }
+  t("revive: transcript no corrupto en replay", !corrupt);
+  t("revive: tick reconstruido", re.tick === live.tick);
+  t("revive: transcript idéntico", re.transcript === live.transcript);
+  t("revive: estado serpientes idéntico", JSON.stringify(re.snakes.map((s) => [s.body, s.alive, s.health, s.kills])) === JSON.stringify(live.snakes.map((s) => [s.body, s.alive, s.health, s.kills])));
+  t("revive: comida idéntica", JSON.stringify(re.food) === JSON.stringify(live.food));
+  t("revive: status idéntico (" + re.status + ", tick " + re.tick + ")", re.status === live.status);
+}
+
 console.log(`\n${pass} ✅ · ${fails} ❌`);
 process.exit(fails ? 1 : 0);
+
