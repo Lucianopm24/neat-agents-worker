@@ -271,6 +271,14 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
       return Response.json({ success: true, tip: "🚦 Mesa arrancada por su creador — las sillas libres son de la casa 🏠." }, { headers: rl });
     }
     if (!act && request.method === "GET") {
+      // 🎞️ replay determinista (del jefe): el cliente re-simula seed+transcript; verificado idéntico a placements reales
+      if (url.searchParams.get("replay") === "1") {
+        if (row.status !== "finished") return errA(409, "NOT_FINISHED", "El replay sale cuando la mesa termina.", "Mientras tanto: espéctala en vivo con el código 👁️.");
+        const seatsR = JSON.parse(row.seats_json);
+        const own = seatsR.find((s) => s.id === playerId) || (playerId.startsWith("h:") && seatsR.find((s) => s.id === "a:" + playerId.slice(2)));
+        if (!own) return errA(403, "NOT_YOUR_GAME", "Replays solo de mesas donde juegas tú o tu agente.", "Lobby público con replays: roadmap.");
+        return Response.json({ success: true, data: { game: gameViewLite(row), replay: { seed: row.seed, ticks: row.ticks, tick_ms: row.tick_ms, ids: seatsR.map((s) => s.id), w: 15, h: 15, cap: 600, zone_every: 50, placements: JSON.parse(row.placements_json || "[]"), transcript: row.transcript_b64 ? atob(row.transcript_b64) : "" } }, tip: "🎞️ Replay determinista: re-simulación con la misma seed (fiel en mesas v2 15×15 zona).", }, { headers: rl });
+      }
       let live = null;
       if (row.status === "active") {
         const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
