@@ -48,7 +48,7 @@ export function rngFrom(seed) { // mulberry32 determinista
 }
 
 // estado: {w,h,tickMs,tick,status,snakes:[{id,body:[[x,y]..],dir,health,alive,place,kills,cause}],food:[[x,y]..],transcript}
-export function createGame(ids, { seed = "s", w = 15, h = 15, tickMs = 750, capTicks = 600, zoneEvery = 50 } = {}) {
+export function createGame(ids, { seed = "s", w = 15, h = 15, tickMs = 750, capTicks = 600, zoneEvery = 50, mode = "vs" } = {}) {
   const rng = rngFrom(seed);
   const n = ids.length;
   // spawns repartidos: anillo alrededor del centro, lejos entre sí
@@ -62,7 +62,7 @@ export function createGame(ids, { seed = "s", w = 15, h = 15, tickMs = 750, capT
     const [dx, dy] = DIRS[dir];
     return { id, body: [[x, y], [x - dx, y - dy], [x - 2 * dx, y - 2 * dy]].map(([a, b]) => [Math.max(0, Math.min(w - 1, a)), Math.max(0, Math.min(h - 1, b))]), dir, health: 100, alive: true, place: null, kills: 0, cause: null };
   });
-  const G = { w, h, tickMs, capTicks, zoneEvery, tick: 0, status: "active", snakes, food: [], transcript: "", rng };
+  const G = { w, h, tickMs, capTicks, zoneEvery, mode, tick: 0, status: "active", snakes, food: [], transcript: "", rng };
   spawnFood(G); spawnFood(G);
   return G;
 }
@@ -135,10 +135,11 @@ export function applyTick(G, dirs) {
   const aliveNow = G.snakes.filter((s) => s.alive).length;
   for (const s of G.snakes) if (!s.alive && s.place === null) s.place = aliveNow + 1;
   // respawn comida: mantener ⌈vivas/2⌉
-  const target = Math.max(1, Math.ceil(aliveNow / 2));
+  const target = G.mode === "survival" ? 2 : Math.max(1, Math.ceil(aliveNow / 2)); // supervivencia: 2 manzanas — el reto es pilotar, no la suerte
   while (G.food.length < target) { const before = G.food.length; spawnFood(G); if (G.food.length === before) break; } // sin hueco seguro libre → no forzar (la zona manda)
   // fin de partida
-  if (aliveNow <= 1 || G.tick >= G.capTicks) {
+  const tableOver = G.mode === "survival" ? aliveNow < 1 : aliveNow <= 1; // 🕐 supervivencia: la mesa vive mientras tú vivas
+  if (tableOver || G.tick >= G.capTicks) {
     const survivors = G.snakes.filter((s) => s.alive).sort((a, b) => b.body.length - a.body.length || b.health - a.health || a.id.localeCompare(b.id));
     let p = 1;
     for (const s of survivors) { s.alive = false; s.cause = "end"; s.place = p++; }
@@ -227,7 +228,7 @@ async function eloApply(env, placements) {
 function gameViewLite(row) {
   return {
     game_id: row.game_id, code: row.code, size: row.size, status: row.status, tick_ms: row.tick_ms,
-    ticks: row.ticks, created_at: row.created_at, start_at: row.start_at, fill_ai: row.fill_ai ?? 1, zone_every: row.zone_every ?? 50, seats: JSON.parse(row.seats_json || "[]"),
+    ticks: row.ticks, created_at: row.created_at, start_at: row.start_at, fill_ai: row.fill_ai ?? 1, zone_every: row.zone_every ?? 50, mode: row.mode || "vs", seats: JSON.parse(row.seats_json || "[]"),
     placements: row.placements_json ? JSON.parse(row.placements_json) : null,
   };
 }
@@ -240,20 +241,21 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
   // POST /games {size?, solo?, ai?} → crea mesa (privada con code); solo:true → rellena IA ya · ai:false → la casa NO cubre sillas (duelo puro, regla del jefe v2.1)
   if (sub === "/games" && request.method === "POST") {
     const body = await request.json().catch(() => ({}));
-    const size = [2, 4, 6, 8, 12].includes(body?.size) ? body.size : 4;
-    const fillAi = body?.solo ? 1 : (body?.ai === false ? 0 : 1);
+    const mode = body?.mode === "survival" ? "survival" : "vs"; // 🕐 supervivencia: 1 silla, tú contra la zona y el reloj (modo del jefe)
+    const size = mode === "survival" ? 1 : ([2, 4, 6, 8, 12].includes(body?.size) ? body.size : 4);
+    const fillAi = mode === "survival" ? 0 : (body?.solo ? 1 : (body?.ai === false ? 0 : 1));
     const zoneEvery = [35, 50, 70].includes(body?.zone) ? body.zone : 50; // 🐇35 / ⚖️50 / 🐢70 (creador elige; regla del jefe)
     const gid = newGameId(), code = newCode();
     const seats = [{ id: playerId }];
-    if (body?.solo) for (let i = 1; i < size; i++) seats.push({ id: "ai:casa" + i });
-    const start_at = body?.solo ? Date.now() + 3000 : null; // privada con code: SOLO arranque manual del creador (regla del jefe 🦞) — caduca ~45min vacía
-    await env.DB.prepare("INSERT INTO snake_games (game_id, code, size, seed, tick_ms, ticks, status, seats_json, placements_json, transcript_b64, created_at, start_at, fill_ai, zone_every) VALUES (?,?,?,?,?,0,'starting',?,NULL,'',?,?,?,?)")
-      .bind(gid, code, size, gid + ":" + code, parseInt(env.SNAKE_TICK_MS || "750", 10), JSON.stringify(seats), ISO(), start_at, fillAi, zoneEvery).run();
+    if (body?.solo && mode !== "survival") for (let i = 1; i < size; i++) seats.push({ id: "ai:casa" + i });
+    const start_at = (body?.solo || mode === "survival") ? Date.now() + 3000 : null; // práctica y supervivencia arrancan solas; privada con code: SOLO arranque manual del creador (regla del jefe 🦞) — caduca ~45min vacía
+    await env.DB.prepare("INSERT INTO snake_games (game_id, code, size, seed, tick_ms, ticks, status, seats_json, placements_json, transcript_b64, created_at, start_at, fill_ai, zone_every, mode) VALUES (?,?,?,?,?,0,'starting',?,NULL,'',?,?,?,?,?)")
+      .bind(gid, code, size, gid + ":" + code, parseInt(env.SNAKE_TICK_MS || "750", 10), JSON.stringify(seats), ISO(), start_at, fillAi, zoneEvery, mode).run();
     const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
     ctx.waitUntil(stub.fetch("https://do/boot?gid=" + gid, { method: "POST" }));
     for (const s of seats) if (!s.id.startsWith("ai:")) await notify(env, s.id, "snake_starting", { game_id: gid, code, size, start_at });
     return Response.json({ success: true, data: { game: { game_id: gid, code, size, status: "starting", seats, start_at },
-      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `[zona cada ${zoneEvery}t] Comparte el code ${code} — la mesa NO arranca sola: la empieza su creador (botón 🚦 en la sala o POST /arena/snake/games/{id}/start). ${fillAi ? "Las sillas libres las cubre la casa 🏠." : "Sin IA de la casa 🚫🏠 — duelos puros: hacen falta ≥2 jugadores reales."} Caduca ~45min si queda vacía. Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
+      tip: mode === "survival" ? `🕐 SUPERVIVENCIA [zona cada ${zoneEvery}t]: tú solo, sin casa, sin ELO — arranca en ~3s. Pide ya tu ticket GET /arena/snake/ticket?game_id=${gid} y aguanta lo máximo; tu récord queda en GET /arena/snake/survival/best. Cap 600t teórico (la zona llena el 15×15 hacia t${zoneEvery * 8}).` : body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `[zona cada ${zoneEvery}t] Comparte el code ${code} — la mesa NO arranca sola: la empieza su creador (botón 🚦 en la sala o POST /arena/snake/games/{id}/start). ${fillAi ? "Las sillas libres las cubre la casa 🏠." : "Sin IA de la casa 🚫🏠 — duelos puros: hacen falta ≥2 jugadores reales."} Caduca ~45min si queda vacía. Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
   }
 
   // POST /games/{id}/join {code} · POST /games/{id}/start (creador fuerza arranque) · GET /games/{id}
@@ -278,7 +280,7 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
         const seatsR = JSON.parse(row.seats_json);
         const own = seatsR.find((s) => s.id === playerId) || (playerId.startsWith("h:") && seatsR.find((s) => s.id === "a:" + playerId.slice(2)));
         if (!own) return errA(403, "NOT_YOUR_GAME", "Replays solo de mesas donde juegas tú o tu agente.", "Lobby público con replays: roadmap.");
-        return Response.json({ success: true, data: { game: gameViewLite(row), replay: { seed: row.seed, ticks: row.ticks, tick_ms: row.tick_ms, ids: seatsR.map((s) => s.id), w: 15, h: 15, cap: 600, zone_every: row.zone_every ?? 50, placements: JSON.parse(row.placements_json || "[]"), transcript: row.transcript_b64 ? atob(row.transcript_b64) : "" } }, tip: "🎞️ Replay determinista: re-simulación con la misma seed (fiel en mesas v2 15×15 zona).", }, { headers: rl });
+        return Response.json({ success: true, data: { game: gameViewLite(row), replay: { seed: row.seed, ticks: row.ticks, tick_ms: row.tick_ms, ids: seatsR.map((s) => s.id), w: 15, h: 15, cap: 600, zone_every: row.zone_every ?? 50, mode: row.mode || "vs", placements: JSON.parse(row.placements_json || "[]"), transcript: row.transcript_b64 ? atob(row.transcript_b64) : "" } }, tip: "🎞️ Replay determinista: re-simulación con la misma seed (fiel en mesas v2 15×15 zona).", }, { headers: rl });
       }
       let live = null;
       if (row.status === "active") {
@@ -368,6 +370,15 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     const rows = await env.DB.prepare("SELECT * FROM snake_ratings ORDER BY rating DESC, games DESC LIMIT ?").bind(limit).all();
     const lb = (rows.results || []).map((r, i) => ({ rank: i + 1, player: r.player, rating: r.rating, ...leagueFromElo(r.rating), games: r.games, wins: r.wins, podiums: r.podiums, updated_at: r.updated_at }));
     return Response.json({ success: true, data: { leaderboard: lb, tip: "ELO snake separado del ajedrez: cada mesa cuenta duelos por posición entre todos los pares." } }, { headers: rl });
+  }
+
+  // GET /survival/best → mi récord + top 10 (modo 🕐 supervivencia, sin ELO)
+  if (sub === "/survival/best" && request.method === "GET") {
+    let top = [];
+    try { top = (await env.DB.prepare("SELECT player, best_ticks, game_id, updated_at FROM snake_survival_best ORDER BY best_ticks DESC, updated_at ASC LIMIT 10").all()).results || []; } catch { /* tabla recién nacida */ }
+    let mine = null;
+    try { mine = await env.DB.prepare("SELECT player, best_ticks, game_id, updated_at FROM snake_survival_best WHERE player=?").bind(playerId).first(); } catch {}
+    return Response.json({ success: true, data: { best: mine || null, top: top.map((r, i) => ({ rank: i + 1, ...r })), tip: "🕐 Supervivencia: ticks con vida, sin ELO. Crea una con POST /arena/snake/games {mode:'survival', zone?} — tú solo contra la zona." } }, { headers: rl });
   }
 
   // GET /ticket?game_id= → WS (rol: play si estás sentado; spectate si juega tu agente a:<tú>)
@@ -474,7 +485,7 @@ export class SnakeRoom {
     const seats = JSON.parse(row.seats_json);
     const ids = seats.map((s) => s.id);
     const CH = { u: "up", d: "down", l: "left", r: "right" };
-    const G = createGame(ids, { seed: row.seed, tickMs: row.tick_ms, zoneEvery: row.zone_every || 50 });
+    const G = createGame(ids, { seed: row.seed, tickMs: row.tick_ms, zoneEvery: row.zone_every || 50, mode: row.mode || "vs" });
     let p = 0;
     while (G.status === "active" && G.tick < snap.tick) {
       const aliveNow = G.snakes.filter((s) => s.alive);
@@ -509,7 +520,7 @@ export class SnakeRoom {
     let aiN = seats.filter((s) => s.id.startsWith("ai:")).length + 1;
     if (this.row.fill_ai !== 0) while (seats.length < this.row.size) seats.push({ id: "ai:casa" + aiN++ }); // ai:false → duelo puro sin casa (REST ya exigió ≥2 reales)
     await this.env.DB.prepare("UPDATE snake_games SET status='active', seats_json=? WHERE game_id=?").bind(JSON.stringify(seats), this.gid).run();
-    this.G = createGame(seats.map((s) => s.id), { seed: this.row.seed, tickMs: this.row.tick_ms, zoneEvery: this.row.zone_every || 50 });
+    this.G = createGame(seats.map((s) => s.id), { seed: this.row.seed, tickMs: this.row.tick_ms, zoneEvery: this.row.zone_every || 50, mode: this.row.mode || "vs" });
     this.seatIds = seats.map((s) => s.id);
     // espejo snake→humano dueño (para inputs web) y autopilots iniciales de la casa
     this.ownerOf = {};
@@ -548,12 +559,23 @@ export class SnakeRoom {
   }
   async finish() {
     clearInterval(this.timer);
+    const mode = this.row?.mode || "vs";
     const placements = this.G.snakes.map((s) => ({ player: s.id, place: s.place, kills: s.kills, len: s.body.length }));
-    let elo = [];
-    try { elo = await eloApply(this.env, placements); } catch (e) { /* ELO best-effort */ }
+    let elo = [], survival = null;
+    if (mode === "survival") { // 🕐 score = ticks con vida; récord personal en snake_survival_best (mejor esfuerzo)
+      const me = this.G.snakes[0]?.id, score = this.G.tick;
+      if (me) try {
+        const prev = (await this.env.DB.prepare("SELECT best_ticks FROM snake_survival_best WHERE player=?").bind(me).first())?.best_ticks || 0;
+        await this.env.DB.prepare("INSERT INTO snake_survival_best (player, best_ticks, game_id, updated_at) VALUES (?,?,?,?) ON CONFLICT(player) DO UPDATE SET best_ticks=MAX(best_ticks, excluded.best_ticks), game_id=CASE WHEN excluded.best_ticks > snake_survival_best.best_ticks THEN excluded.game_id ELSE snake_survival_best.game_id END, updated_at=CASE WHEN excluded.best_ticks > snake_survival_best.best_ticks THEN excluded.updated_at ELSE snake_survival_best.updated_at END")
+          .bind(me, score, this.gid, ISO()).run();
+        survival = { score, best: Math.max(prev, score), record: score > prev };
+      } catch (e) { survival = { score, best: score, record: false }; }
+    } else {
+      try { elo = await eloApply(this.env, placements); } catch (e) { /* ELO best-effort */ }
+    }
     await this.env.DB.prepare("UPDATE snake_games SET status='finished', ticks=?, placements_json=?, transcript_b64=?, duration_ms=? WHERE game_id=?")
       .bind(this.G.tick, JSON.stringify(placements), btoa(this.G.transcript), Date.now() - new Date(this.row.created_at).getTime(), this.gid).run();
-    this.broadcast({ t: "end", placements, elo, ticks: this.G.tick });
+    this.broadcast({ t: "end", mode, placements, elo, ticks: this.G.tick, survival });
     for (const p of placements) if (!p.player.startsWith("ai:")) { const d = elo.find((x) => x.player === p.player); await notify(this.env, p.player, "snake_over", { game_id: this.gid, place: p.place, elo: d || null }); const own = this.ownerOf[p.player]; if (own) await notify(this.env, own, "snake_over", { game_id: this.gid, agent: p.player, place: p.place, elo: d || null }); }
     setTimeout(() => { for (const ws of this.sessions.keys()) try { ws.close(1000, "fin"); } catch {} this.sessions.clear(); }, 4000);
   }

@@ -240,6 +240,39 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
   t("casa: en rojo busca la salida (right)", aiDir(G, "ai:c") === "right");
 }
 
+// ── 🕐 Modo SUPERVIVENCIA (del jefe): 1 silla, la mesa vive mientras tú vivas ──
+{
+  const G = createGame(["a:solo"], { seed: "sv1", zoneEvery: 70, capTicks: 600, mode: "survival" });
+  applyTick(G, new Map()); applyTick(G, new Map());
+  t("supervivencia: 1 serpiente viva y la mesa SIGUE", G.status === "active" && G.snakes[0].alive);
+  t("supervivencia: objetivo de comida fijo en 2", G.food.length === 2);
+}
+{
+  const G = createGame(["a:solo"], { seed: "sv1" });
+  applyTick(G, new Map());
+  t("vs: 1 sola serpiente cierra la mesa (regla clásica intacta)", G.status === "finished");
+}
+{
+  const G = mkG([mkSnake("a:x", [[0, 5], [1, 5], [2, 5]], "left")], { mode: "survival" });
+  applyTick(G, new Map());
+  t("supervivencia: al morir la única termina (wall)", !G.snakes[0].alive && G.status === "finished");
+  t("supervivencia: place 1 y causa conservada", G.snakes[0].place === 1 && G.snakes[0].cause === "wall");
+}
+{
+  const G = mkG([mkSnake("a:x", [[5, 5], [5, 6], [5, 7]], "up")], { mode: "survival" });
+  G.food = [[5, 4]];
+  applyTick(G, new Map());
+  t("supervivencia: come y respawn hasta 2 manzanas", G.snakes[0].body.length === 4 && G.food.length === 2);
+}
+{
+  // temporada completa pilotada por la casa: aguanta lo suyo y cierra dentro del cap
+  const G = createGame(["ai:casa1"], { seed: "sv-larga", zoneEvery: 70, mode: "survival" });
+  let guard = 0;
+  while (G.status === "active" && guard++ < 610) { const d = aiDir(G, "ai:casa1"); applyTick(G, d ? new Map([["ai:casa1", d]]) : new Map()); }
+  t("supervivencia IA casa: aguanta >30 ticks", G.tick > 30);
+  t("supervivencia IA casa: termina dentro del cap 600", G.status === "finished" && G.tick <= 600);
+}
+
 console.log(`\n${pass} ✅ · ${fails} ❌`);
 process.exit(fails ? 1 : 0);
 
