@@ -134,6 +134,18 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
   t("duelo de IAs termina dentro del cap", G.status === "finished" && G.tick <= 200);
 }
 
+// ── 11. zona configurable (del jefe): 35 rápido / 50 normal / 70 lento — margen obedece zoneEvery (función pura) ──
+{
+  let ok = true;
+  for (const [ze, tIn, tOut] of [[35, 35, 34], [50, 50, 49], [70, 70, 69]]) {
+    if (zoneMargin({ tick: tOut, zoneEvery: ze }) !== 0 || zoneMargin({ tick: tIn, zoneEvery: ze }) !== 1) ok = false;
+  }
+  // y el engine respeta la suya propia (wiring createGame → zoneMargin; sin sesgo de supervivencia)
+  const a = createGame(["a:X", "a:Y"], { seed: "ze-a", zoneEvery: 35 }); a.tick = 40;
+  const b = createGame(["a:X", "a:Y"], { seed: "ze-a", zoneEvery: 70 }); b.tick = 40;
+  t("zona configurable: margen 0→1 exacto al borde (35/50/70) y el engine respeta su zona (a:" + zoneMargin(a) + " b:" + zoneMargin(b) + ")", ok && zoneMargin(a) === 1 && zoneMargin(b) === 0);
+}
+
 
 // ── Revive (anti-hibernación): reconstruir desde transcript reproduce el estado exacto ──
 {
