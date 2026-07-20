@@ -220,22 +220,30 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     const gid = newGameId(), code = newCode();
     const seats = [{ id: playerId }];
     if (body?.solo) for (let i = 1; i < size; i++) seats.push({ id: "ai:casa" + i });
-    const start_at = Date.now() + (body?.solo ? 3000 : 12000);
+    const start_at = Date.now() + (body?.solo ? 3000 : 60000); // privada con code: ~60s para invitar (el creador puede forzar arranque)
     await env.DB.prepare("INSERT INTO snake_games (game_id, code, size, seed, tick_ms, ticks, status, seats_json, placements_json, transcript_b64, created_at, start_at) VALUES (?,?,?,?,?,0,'starting',?,NULL,'',?,?)")
       .bind(gid, code, size, gid + ":" + code, parseInt(env.SNAKE_TICK_MS || "750", 10), JSON.stringify(seats), ISO(), start_at).run();
     const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
     ctx.waitUntil(stub.fetch("https://do/boot?gid=" + gid, { method: "POST" }));
     for (const s of seats) if (!s.id.startsWith("ai:")) await notify(env, s.id, "snake_starting", { game_id: gid, code, size, start_at });
     return Response.json({ success: true, data: { game: { game_id: gid, code, size, status: "starting", seats, start_at },
-      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `Comparte el code ${code} — arranca en ~12s con las sillas libres para la casa. Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
+      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `Comparte el code ${code} — arranca en ~60s con las sillas libres para la casa (el creador la puede arrancar ya con POST /arena/snake/games/{id}/start). Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
   }
 
-  // POST /games/{id}/join {code} · GET /games/{id}
-  const g = sub.match(/^\/games\/(g_[A-Za-z0-9]{9,})(\/(join|ticket))?$/);
+  // POST /games/{id}/join {code} · POST /games/{id}/start (creador fuerza arranque) · GET /games/{id}
+  const g = sub.match(/^\/games\/(g_[A-Za-z0-9]{9,})(\/(join|ticket|start))?$/);
   if (g) {
     const gid = g[1], act = g[3];
     const row = await env.DB.prepare("SELECT * FROM snake_games WHERE game_id = ?").bind(gid).first();
     if (!row) return errA(404, "GAME_NOT_FOUND", "Esa mesa no existe.", "Lista las tuyas con GET /arena/snake/games.");
+    if (act === "start" && request.method === "POST") {
+      if (row.status !== "starting") return errA(409, "ALREADY_STARTED", "Esa mesa ya arrancó o terminó.", "Entra como espectador pidiendo GET /arena/snake/ticket?game_id=.");
+      const seats = JSON.parse(row.seats_json);
+      if (seats[0]?.id !== playerId) return errA(403, "NOT_CREATOR", "Solo quien creó la mesa puede arrancarla antes de tiempo.", "Espera la cuenta atrás — llega rápido.");
+      const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
+      ctx.waitUntil(stub.fetch("https://do/start-now?gid=" + gid, { method: "POST" }));
+      return Response.json({ success: true, tip: "🚦 Mesa arrancada por su creador — las sillas libres son de la casa 🏠." }, { headers: rl });
+    }
     if (!act && request.method === "GET") {
       let live = null;
       if (row.status === "active") {
@@ -382,12 +390,69 @@ export class SnakeRoom {
     if (!this.gid) { console.error("[snake] boot sin gid"); return; }
     this.row = await this.env.DB.prepare("SELECT * FROM snake_games WHERE game_id=?").bind(this.gid).first();
     if (!this.row) return;
-    const wait = Math.max(0, this.row.start_at - Date.now());
-    clearTimeout(this.countdown);
-    this.countdown = setTimeout(() => this.start().catch((e) => this.abort("boot:" + e.message)), wait);
+    await this.ctx.storage.put("gid", this.gid); // hibernación: el DO despierta por alarma y necesita saber quién es
+    await this.ctx.storage.setAlarm(Math.max(Date.now() + 200, this.row.start_at)); // setTimeout NO sobrevive al aislamiento dormido; la alarma sí
+  }
+  async alarm() { // watchdog + arranque: corre aunque el DO haya hibernado
+    try {
+      if (!this.gid) this.gid = (await this.ctx.storage.get("gid")) || null;
+      if (!this.gid) return;
+      const row = await this.env.DB.prepare("SELECT * FROM snake_games WHERE game_id=?").bind(this.gid).first();
+      if (!row) return;
+      if (row.status === "starting") {
+        if (row.start_at <= Date.now()) await this.start();
+        else await this.ctx.storage.setAlarm(row.start_at); // disparo temprano (fuentes duplicadas): reprograma
+        return;
+      }
+      if (row.status === "active") {
+        if (this.paced && this.G) { await this.ctx.storage.setAlarm(Date.now() + 15000); return; } // viva y al ritmo: solo re-arma el watchdog
+        const ok = await this.revive(row);
+        if (!ok) return;
+        const expected = Math.min(this.G.capTicks, Math.max(0, Math.floor((Date.now() - row.start_at) / row.tick_ms)));
+        while (this.G.status === "active" && this.G.tick < expected) applyTick(this.G, this.tickDirs()); // catch-up determinista
+        if (this.G.status === "finished") { await this.finish(); return; }
+        this.paced = true;
+        clearInterval(this.timer);
+        this.timer = setInterval(() => this.tickLoop(), row.tick_ms);
+        await this.persistSnap();
+        await this.ctx.storage.setAlarm(Date.now() + 15000);
+        this.stateMsg();
+      }
+    } catch (e) { try { console.error("[snake] alarm:", e.message); } catch {} }
+  }
+  async revive(row) { // reconstruye la partida desde el transcript (engine determinista: mismo seed + mismas dirs = mismo juego)
+    const snap = await this.ctx.storage.get("snap");
+    if (!snap || typeof snap.transcript !== "string") return false;
+    const seats = JSON.parse(row.seats_json);
+    const ids = seats.map((s) => s.id);
+    const CH = { u: "up", d: "down", l: "left", r: "right" };
+    const G = createGame(ids, { seed: row.seed, tickMs: row.tick_ms });
+    let p = 0;
+    while (G.status === "active" && G.tick < snap.tick) {
+      const aliveNow = G.snakes.filter((s) => s.alive);
+      const dirs = new Map();
+      let ok = true;
+      for (const s of aliveNow) { const ch = snap.transcript[p++]; if (!ch || ch === "_" || !CH[ch]) { ok = false; break; } dirs.set(s.id, CH[ch]); }
+      p += ids.length - aliveNow.length; // '_' de las que ya venían muertas
+      if (!ok) return false;
+      applyTick(G, dirs);
+    }
+    if (G.tick !== snap.tick) return false;
+    this.row = row; this.G = G; this.seatIds = ids;
+    this.ownerOf = {};
+    for (const id of ids) if (id.startsWith("a:")) this.ownerOf[id] = "h:" + id.slice(2);
+    for (const id of ids) this.autopilot.add(id); // nadie estaba conectado: la casa lo pilota todo hasta que vuelvan (reaparición quita autopilot al primer input)
+    return true;
+  }
+  async persistSnap() { try { await this.ctx.storage.put("snap", { tick: this.G.tick, transcript: this.G.transcript }); } catch {} }
+  tickDirs() { // direcciones del tick: casa pilotando (IA/AFK) o input humano/agente
+    const dirs = new Map();
+    for (const id of this.seatIds) { const ai = this.autopilot.has(id) || id.startsWith("ai:"); dirs.set(id, ai ? aiDir(this.G, id) : (this.inputs.get(id) || undefined)); }
+    this.inputs.clear();
+    return dirs;
   }
   async start() {
-    if (!this.row || this.row.status !== "starting") return;
+    if (!this.gid) return;
     // releer sillas (pueden haberse llenado durante la cuenta atrás)
     const fresh = await this.env.DB.prepare("SELECT * FROM snake_games WHERE game_id=?").bind(this.gid).first();
     if (!fresh || fresh.status !== "starting") return;
@@ -402,27 +467,34 @@ export class SnakeRoom {
     this.ownerOf = {};
     for (const id of this.seatIds) if (id.startsWith("a:")) this.ownerOf[id] = "h:" + id.slice(2);
     for (const id of this.seatIds) if (id.startsWith("ai:")) this.autopilot.add(id);
+    // ausentes al arranque: la casa te cubre la silla hasta que reaparezcas (nada de morir por mirar el lobby)
+    const connected = new Set([...this.sessions.values()].map((s) => s.player));
+    for (const id of this.seatIds) if (!id.startsWith("ai:") && !connected.has(id)) this.autopilot.add(id);
     for (const id of this.seatIds) if (!id.startsWith("ai:")) { await notify(this.env, id, "snake_start", { game_id: this.gid }); const own = this.ownerOf[id]; if (own) await notify(this.env, own, "snake_start", { game_id: this.gid, agent: id }); }
     this.broadcast({ t: "start", game_id: this.gid, size: this.row.size, tick_ms: this.row.tick_ms });
     this.stateMsg();
+    this.paced = true;
     this.timer = setInterval(() => this.tickLoop(), this.row.tick_ms);
+    await this.persistSnap();
+    await this.ctx.storage.setAlarm(Date.now() + 15000); // watchdog anti-hibernación
   }
+  lobbyView() { // sala de espera: sillas + cuenta atrás (la UI pinta el lobby con esto)
+    const seats = this.row ? JSON.parse(this.row.seats_json) : [];
+    return { t: "lobby", game_id: this.gid || null, size: this.row?.size || seats.length, code: this.row?.code || null, start_at: this.row?.start_at || null, seats };
+  }
+  lobbyTo(ws) { if (!this.row) return; try { ws.send(JSON.stringify(this.lobbyView())); } catch {} }
+  lobbyMsg() { if (this.row) this.broadcast(this.lobbyView()); }
   stateMsg() {
     const tiny = (s) => ({ id: s.id, name: playerLabel(s.id), body: s.body, dir: s.dir, health: s.health, alive: s.alive, place: s.place, kills: s.kills });
     this.broadcast({ t: "state", tick: this.G.tick, snakes: this.G.snakes.map(tiny), food: this.G.food, next_tick_at: Date.now() + this.row.tick_ms });
   }
-  tickLoop() {
+  async tickLoop() {
     try {
-      const dirs = new Map();
-      for (const id of this.seatIds) {
-        const ai = this.autopilot.has(id) || id.startsWith("ai:");
-        dirs.set(id, ai ? aiDir(this.G, id) : (this.inputs.get(id) || undefined));
-      }
-      const { events } = applyTick(this.G, dirs);
-      this.inputs.clear();
+      const { events } = applyTick(this.G, this.tickDirs());
       for (const ev of events) if (ev.type === "death") this.broadcast({ t: "death", tick: ev.tick, snake: ev.snake, cause: ev.cause });
       if (this.G.status === "finished") return this.finish().catch((e) => this.broadcast({ t: "err", code: "FINISH_FAIL", message: e.message }));
       this.stateMsg();
+      await this.persistSnap();
     } catch (e) { this.abort("tick:" + e.message); }
   }
   async finish() {
@@ -444,7 +516,13 @@ export class SnakeRoom {
     if (!this.gid) this.gid = url.searchParams.get("gid") || null;
     if (url.pathname === "/boot") { this.ctx.waitUntil(this.boot()); return new Response("ok"); }
     if (url.pathname === "/seat") {
-      // asiento tardío durante la cuenta atrás: ya persistido por REST; el engine se crea al start (releéndo D1)
+      // asiento tardío durante la cuenta atrás: ya persistido por REST; el engine se crea al start (releéndo D1).
+      // avisar al lobby para que la UI pinte la nueva silla al instante
+      try { if (!this.G && this.row && this.row.status === "starting") { const fresh = await this.env.DB.prepare("SELECT seats_json FROM snake_games WHERE game_id=?").bind(this.gid).first(); if (fresh) { this.row.seats_json = fresh.seats_json; this.lobbyMsg(); } } } catch {}
+      return new Response("ok");
+    }
+    if (url.pathname === "/start-now") { // el creador fuerza el arranque (REST ya validó propiedad + estado)
+      this.ctx.waitUntil(this.start().catch((e) => this.abort("startnow:" + e.message)));
       return new Response("ok");
     }
     if (url.pathname === "/peek") {
@@ -458,7 +536,12 @@ export class SnakeRoom {
     this.sessions.set(server, { player, role });
     server.accept();
     server.send(JSON.stringify({ t: "hello", player, role, game_id: this.gid || null }));
-    if (this.G) this.stateMsgTo(server);
+    if (this.G) { this.stateMsgTo(server); }
+    else if (this.row && this.row.status === "starting") {
+      this.lobbyTo(server); // sala de espera con cuenta atrás — adiós "no hay serpientes"
+      const sn = this.resolveSnake(player);
+      if (sn && !sn.startsWith("ai:")) { this.autopilot.delete(sn); this.lastSeen.set(sn, Date.now()); } // llegó antes del arranque: no eres casa
+    }
     server.addEventListener("message", (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.t === "ping") { try { server.send(JSON.stringify({ t: "pong" })); } catch {} return; }
@@ -471,8 +554,14 @@ export class SnakeRoom {
         if (this.autopilot.has(snake) && !snake.startsWith("ai:")) this.autopilot.delete(snake); // reapareció
       }
     });
-    server.addEventListener("close", () => { this.sessions.delete(server); });
-    server.addEventListener("error", () => { this.sessions.delete(server); });
+    const afk = () => { // se fue: la casa le cubre la silla (juega por ti hasta que vuelvas — el primer input te devuelve el mando)
+      const s = this.sessions.get(server);
+      this.sessions.delete(server);
+      const sn = s && this.resolveSnake(s.player);
+      if (sn && !sn.startsWith("ai:")) this.autopilot.add(sn);
+    };
+    server.addEventListener("close", afk);
+    server.addEventListener("error", afk);
     return new Response(null, { status: 101, webSocket: client });
   }
   stateMsgTo(ws) {
@@ -480,7 +569,8 @@ export class SnakeRoom {
     try { ws.send(JSON.stringify({ t: "state", tick: this.G.tick, snakes: this.G.snakes.map(tiny), food: this.G.food, next_tick_at: Date.now() + (this.row?.tick_ms || 750) })); } catch {}
   }
   resolveSnake(player) {
-    if (!this.seatIds) return null;
-    return this.seatIds.includes(player) ? player : null; // dueños de agente entran con role=spectate (el DO ya los filtra)
+    const ids = this.seatIds || (this.row ? JSON.parse(this.row.seats_json).map((s) => s.id) : null);
+    if (!ids) return null;
+    return ids.includes(player) ? player : null; // dueños de agente entran con role=spectate (el DO ya los filtra)
   }
 }
