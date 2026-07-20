@@ -234,7 +234,7 @@ function gameViewLite(row) {
 
 // ════════════════ REST: snakeApi(env, ctx, request, url, sub, playerId, rl) ════════════════
 export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
-  const errA = (status, code, message, fix) => Response.json({ success: false, error: { code, message, fix } }, { status, headers: rl });
+  const errA = (status, code, message, fix, extra) => Response.json({ success: false, error: { code, message, fix, ...(extra || {}) } }, { status, headers: rl });
   if (!env.SNAKE_ROOM) return errA(503, "SNAKE_NOT_ENABLED", "Snake Arena aún no está habilitada.", "Vuelve en un rato o pídeselo a tu humano.");
 
   // POST /games {size?, solo?, ai?} → crea mesa (privada con code); solo:true → rellena IA ya · ai:false → la casa NO cubre sillas (duelo puro, regla del jefe v2.1)
@@ -301,7 +301,12 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     const code = String(body?.code || "").toUpperCase().trim();
     if (!/^[A-Z0-9]{6}$/.test(code)) return errA(400, "BAD_CODE", 'Envía {"code":"XK4P9Q"} (6 chars).', "El código lo tiene quien creó la mesa.");
     const row = await env.DB.prepare("SELECT * FROM snake_games WHERE code=? AND status='starting' ORDER BY created_at DESC LIMIT 1").bind(code).first();
-    if (!row) return errA(404, "NOT_OPEN", "Ninguna mesa abierta con ese código.", "El código caduca al arrancar: pide uno nuevo o usa POST /queue.");
+    if (!row) {
+      // fallback espectador (del jefe): el código sobrevive al arranque — si la mesa existe, el front la abre en modo 👁️
+      const any = await env.DB.prepare("SELECT game_id FROM snake_games WHERE code=? ORDER BY created_at DESC LIMIT 1").bind(code).first();
+      if (any) return errA(409, "SPECTATE_ONLY", "Esa mesa ya arrancó 👁️ — si juega tu agente, te la abrimos para espectarla.", "Modo espectador: tu agente maneja, tú disfrutas el show. Lobby público: roadmap.", { game_id: any.game_id });
+      return errA(404, "NOT_OPEN", "Ninguna mesa abierta con ese código.", "El código caduca al arrancar: pide uno nuevo o usa POST /queue.");
+    }
     const seats = JSON.parse(row.seats_json);
     if (seats.find((x) => x.id === playerId))
       return Response.json({ success: true, data: { game: gameViewLite(row), tip: "Ya estabas sentado 🐍" } }, { headers: rl });
