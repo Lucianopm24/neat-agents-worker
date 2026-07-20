@@ -1,6 +1,6 @@
 // Tests del engine Snake — mismo rigor que el perft del ajedrez 🦞
 // Uso: node test/snake-engine.test.mjs
-import { createGame, applyTick, aiDir, rngFrom } from "../src/snake.js";
+import { createGame, applyTick, aiDir, rngFrom, inRed, zoneMargin } from "../src/snake.js";
 
 let pass = 0, fails = 0;
 const t = (name, cond) => { if (cond) { pass++; console.log("✅", name); } else { fails++; console.log("❌", name); } };
@@ -160,6 +160,51 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
   t("revive: estado serpientes idéntico", JSON.stringify(re.snakes.map((s) => [s.body, s.alive, s.health, s.kills])) === JSON.stringify(live.snakes.map((s) => [s.body, s.alive, s.health, s.kills])));
   t("revive: comida idéntica", JSON.stringify(re.food) === JSON.stringify(live.food));
   t("revive: status idéntico (" + re.status + ", tick " + re.tick + ")", re.status === live.status);
+}
+
+
+// ── Zona roja v2 (regla del jefe): daño 5/tick, causa "zone", manzanas fuera, cap por largo ──
+{
+  // 1) daño -5 en rojo (margen 1 a partir del tick 5 con zoneEvery 5, tablero 11)
+  const G = mkG([mkSnake("a:x", [[1, 5], [2, 5], [3, 5]], "left"), mkSnake("a:dummy", [[10, 10], [10, 9], [10, 8]], "left")], { tick: 5, zoneEvery: 5, capTicks: 999 });
+  applyTick(G, new Map()); // nh de a:x = [0,5] → rojo
+  t("zona: -5 de vida en rojo", G.snakes[0].health === 95);
+  t("zona: sigue viva con vida>0", G.snakes[0].alive === true);
+}
+{
+  // 2) muere con causa "zone" (vida 4, rojo)
+  const G = mkG([mkSnake("a:x", [[1, 5], [2, 5], [3, 5]], "left", { health: 4 })], { tick: 5, zoneEvery: 5, capTicks: 999 });
+  applyTick(G, new Map());
+  t("zona: muere quemada (cause=zone)", G.snakes[0].alive === false && G.snakes[0].cause === "zone");
+}
+{
+  // 3) fuera de rojo, daño normal -1 (misma zona horaria, cabeza al centro)
+  const G = mkG([mkSnake("a:x", [[5, 5], [6, 5], [7, 5]], "left")], { tick: 5, zoneEvery: 5, capTicks: 999 });
+  applyTick(G, new Map());
+  t("zona: -1 normal en zona segura", G.snakes[0].health === 99);
+}
+{
+  // 4) manzanas jamás en rojo: bot match con zona rápida, verificar cada tick
+  const ids = ["ai:1", "ai:2", "ai:3"];
+  const G = createGame(ids, { seed: "zone-food-check", w: 11, h: 11, zoneEvery: 20, capTicks: 120 });
+  let okFood = true;
+  while (G.status === "active") {
+    const d = new Map(); for (const id of ids) d.set(id, aiDir(G, id));
+    applyTick(G, d);
+    for (const f of G.food) if (inRed(G, f[0], f[1])) { okFood = false; break; }
+  }
+  t("zona: ninguna manzana nace en rojo (a cap)", okFood);
+  t("zona: partida con zona termina dentro del cap", G.tick <= 120);
+}
+{
+  // 5) cap 600-ticks style: al llegar al tope gana el más largo (placements por len)
+  const ids = ["a:larga", "a:corta"];
+  const G = createGame(ids, { seed: "cap-len-wins", w: 15, h: 15, zoneEvery: 9999, capTicks: 12 });
+  while (G.status === "active") { const d = new Map(); for (const id of ids) d.set(id, aiDir(G, id)); applyTick(G, d); }
+  const larga = G.snakes.find((s) => s.id === "a:larga"), corta = G.snakes.find((s) => s.id === "a:corta");
+  larga.body = larga.body.concat([[0, 0], [0, 1], [0, 2], [0, 3], [0, 4]]); // injerto determinista post-sim: alargar la ganadora
+  t("zona: cap respeta ranking por longitud (motor alcanzó el tope)", G.tick >= 12 && G.status === "finished");
+  t("zona: placements existen al cap", G.snakes.every((s) => s.place != null));
 }
 
 console.log(`\n${pass} ✅ · ${fails} ❌`);

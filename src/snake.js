@@ -9,6 +9,10 @@ const CODE_ABC = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
 const OPP = { up: "down", down: "up", left: "right", right: "left" };
 const DIRCODE = { up: "u", down: "d", left: "l", right: "r", _: "_" };
+// Zona roja (regla del jefe, v2): cada zoneEvery ticks el margen seguro se encoge 1 celda por lado.
+// Determinista (solo depende del tick) → revive/replay siguen exactos.
+export function zoneMargin(G) { return Math.floor(G.tick / (G.zoneEvery || 50)); }
+export function inRed(G, x, y) { const m = zoneMargin(G); return m > 0 && (x < m || y < m || x >= G.w - m || y >= G.h - m); }
 
 const LEAGUES = [
   { min: 2000, name: "Leyenda", icon: "👑" }, { min: 1800, name: "Diamante", icon: "💠" },
@@ -44,7 +48,7 @@ export function rngFrom(seed) { // mulberry32 determinista
 }
 
 // estado: {w,h,tickMs,tick,status,snakes:[{id,body:[[x,y]..],dir,health,alive,place,kills,cause}],food:[[x,y]..],transcript}
-export function createGame(ids, { seed = "s", w = 11, h = 11, tickMs = 750, capTicks = 200 } = {}) {
+export function createGame(ids, { seed = "s", w = 15, h = 15, tickMs = 750, capTicks = 600, zoneEvery = 50 } = {}) {
   const rng = rngFrom(seed);
   const n = ids.length;
   // spawns repartidos: anillo alrededor del centro, lejos entre sí
@@ -58,7 +62,7 @@ export function createGame(ids, { seed = "s", w = 11, h = 11, tickMs = 750, capT
     const [dx, dy] = DIRS[dir];
     return { id, body: [[x, y], [x - dx, y - dy], [x - 2 * dx, y - 2 * dy]].map(([a, b]) => [Math.max(0, Math.min(w - 1, a)), Math.max(0, Math.min(h - 1, b))]), dir, health: 100, alive: true, place: null, kills: 0, cause: null };
   });
-  const G = { w, h, tickMs, capTicks, tick: 0, status: "active", snakes, food: [], transcript: "", rng };
+  const G = { w, h, tickMs, capTicks, zoneEvery, tick: 0, status: "active", snakes, food: [], transcript: "", rng };
   spawnFood(G); spawnFood(G);
   return G;
 }
@@ -71,7 +75,7 @@ const freeCells = (G) => {
   for (let y = 0; y < G.h; y++) for (let x = 0; x < G.w; x++) if (!occ.has(x + "," + y)) out.push([x, y]);
   return out;
 };
-function spawnFood(G) { const f = freeCells(G); if (f.length) G.food.push(f[(G.rng() * f.length) | 0]); }
+function spawnFood(G) { const f = freeCells(G).filter(([x, y]) => !inRed(G, x, y)); if (f.length) G.food.push(f[(G.rng() * f.length) | 0]); } // manzanas jamás en zona roja
 
 // Un tick: dirs = Map(id → "up"|...); sin dir → sigue recta (autopilot). Devuelve eventos.
 export function applyTick(G, dirs) {
@@ -96,8 +100,8 @@ export function applyTick(G, dirs) {
     if (s._eat) { eaten.push(fi); events.push({ type: "eat", snake: s.id, at: s._nh }); }
   }
   G.food = G.food.filter((_, i) => !eaten.includes(i));
-  // salud: -1 por tick; si come → 100 y crece (no popea cola)
-  for (const s of alive) { s.health -= 1; if (s._eat) s.health = 100; }
+  // salud: -1 por tick; en zona roja -5; si come → 100 y crece (no popea cola)
+  for (const s of alive) { s._red = inRed(G, s._nh[0], s._nh[1]); s.health -= s._red ? 5 : 1; if (s._eat) s.health = 100; }
   // cuerpos nuevos
   for (const s of alive) s._nb = s._eat ? [s._nh, ...s.body] : [s._nh, ...s.body.slice(0, -1)];
   const die = (s, cause) => { s.alive = false; s.cause = cause; events.push({ type: "death", snake: s.id, cause, tick: G.tick }); };
@@ -106,7 +110,7 @@ export function applyTick(G, dirs) {
     if (!s.alive) continue;
     const [x, y] = s._nh;
     if (x < 0 || y < 0 || x >= G.w || y >= G.h) { die(s, "wall"); continue; }
-    if (s.health <= 0) { die(s, "starve"); continue; }
+    if (s.health <= 0) { die(s, s._red ? "zone" : "starve"); continue; } // caer quemado por la zona ≠ caer de hambre
     let bit = false;
     for (const t of alive) {
       for (let i = 1; i < t._nb.length; i++) if (cellEq(t._nb[i], s._nh)) { die(s, t.id === s.id ? "self" : "bite"); if (t.id !== s.id) t.kills++; bit = true; break; }
@@ -154,7 +158,7 @@ export function aiDir(G, id) {
     const [dx, dy] = DIRS[d];
     return { d, nh: [s.body[0][0] + dx, s.body[0][1] + dy] };
   });
-  const safe = opts.filter((o) => o.nh[0] >= 0 && o.nh[1] >= 0 && o.nh[0] < G.w && o.nh[1] < G.h && !danger.has(o.nh.join(",")));
+  const safe = opts.filter((o) => o.nh[0] >= 0 && o.nh[1] >= 0 && o.nh[0] < G.w && o.nh[1] < G.h && !danger.has(o.nh.join(",")) && !inRed(G, o.nh[0], o.nh[1])); // la casa también respeta la zona
   const pool = safe.length ? safe : opts.filter((o) => o.d !== OPP[s.dir]);
   const pick = pool.length ? pool : [opts.find((o) => o.d === s.dir) || opts[0]];
   let best = pick[0], bd = 1e9;
@@ -494,7 +498,8 @@ export class SnakeRoom {
   lobbyMsg() { if (this.row) this.broadcast(this.lobbyView()); }
   stateMsg() {
     const tiny = (s) => ({ id: s.id, name: playerLabel(s.id), body: s.body, dir: s.dir, health: s.health, alive: s.alive, place: s.place, kills: s.kills });
-    this.broadcast({ t: "state", tick: this.G.tick, snakes: this.G.snakes.map(tiny), food: this.G.food, next_tick_at: Date.now() + this.row.tick_ms });
+    const zm = zoneMargin(this.G);
+    this.broadcast({ t: "state", tick: this.G.tick, snakes: this.G.snakes.map(tiny), food: this.G.food, next_tick_at: Date.now() + this.row.tick_ms, board: this.G.w, zone: zm, zone_next: (zm + 1) * this.G.zoneEvery, cap: this.G.capTicks });
   }
   async tickLoop() {
     try {
