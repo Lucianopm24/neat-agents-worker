@@ -220,14 +220,14 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     const gid = newGameId(), code = newCode();
     const seats = [{ id: playerId }];
     if (body?.solo) for (let i = 1; i < size; i++) seats.push({ id: "ai:casa" + i });
-    const start_at = Date.now() + (body?.solo ? 3000 : 60000); // privada con code: ~60s para invitar (el creador puede forzar arranque)
+    const start_at = body?.solo ? Date.now() + 3000 : null; // privada con code: SOLO arranque manual del creador (regla del jefe 🦞) — caduca ~45min vacía
     await env.DB.prepare("INSERT INTO snake_games (game_id, code, size, seed, tick_ms, ticks, status, seats_json, placements_json, transcript_b64, created_at, start_at) VALUES (?,?,?,?,?,0,'starting',?,NULL,'',?,?)")
       .bind(gid, code, size, gid + ":" + code, parseInt(env.SNAKE_TICK_MS || "750", 10), JSON.stringify(seats), ISO(), start_at).run();
     const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
     ctx.waitUntil(stub.fetch("https://do/boot?gid=" + gid, { method: "POST" }));
     for (const s of seats) if (!s.id.startsWith("ai:")) await notify(env, s.id, "snake_starting", { game_id: gid, code, size, start_at });
     return Response.json({ success: true, data: { game: { game_id: gid, code, size, status: "starting", seats, start_at },
-      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `Comparte el code ${code} — arranca en ~60s con las sillas libres para la casa (el creador la puede arrancar ya con POST /arena/snake/games/{id}/start). Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
+      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `Comparte el code ${code} — la mesa NO arranca sola: la empieza su creador (botón 🚦 en la sala o POST /arena/snake/games/{id}/start). Caduca ~45min si queda vacía. Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
   }
 
   // POST /games/{id}/join {code} · POST /games/{id}/start (creador fuerza arranque) · GET /games/{id}
@@ -237,7 +237,7 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     const row = await env.DB.prepare("SELECT * FROM snake_games WHERE game_id = ?").bind(gid).first();
     if (!row) return errA(404, "GAME_NOT_FOUND", "Esa mesa no existe.", "Lista las tuyas con GET /arena/snake/games.");
     if (act === "start" && request.method === "POST") {
-      if (row.status !== "starting") return errA(409, "ALREADY_STARTED", "Esa mesa ya arrancó o terminó.", "Entra como espectador pidiendo GET /arena/snake/ticket?game_id=.");
+      if (row.status !== "starting") return errA(409, "ALREADY_STARTED", row.status === "expired" ? "Esa mesa caducó por esperar vacía — crea otra." : "Esa mesa ya arrancó o terminó.", "Entra como espectador pidiendo GET /arena/snake/ticket?game_id=.");
       const seats = JSON.parse(row.seats_json);
       if (seats[0]?.id !== playerId) return errA(403, "NOT_CREATOR", "Solo quien creó la mesa puede arrancarla antes de tiempo.", "Espera la cuenta atrás — llega rápido.");
       const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
@@ -391,7 +391,7 @@ export class SnakeRoom {
     this.row = await this.env.DB.prepare("SELECT * FROM snake_games WHERE game_id=?").bind(this.gid).first();
     if (!this.row) return;
     await this.ctx.storage.put("gid", this.gid); // hibernación: el DO despierta por alarma y necesita saber quién es
-    await this.ctx.storage.setAlarm(Math.max(Date.now() + 200, this.row.start_at)); // setTimeout NO sobrevive al aislamiento dormido; la alarma sí
+    await this.ctx.storage.setAlarm(this.row.start_at ? Math.max(Date.now() + 200, this.row.start_at) : Date.now() + 45 * 60 * 1000); // auto: a la hora · manual: caducidad anti-fantasmas
   }
   async alarm() { // watchdog + arranque: corre aunque el DO haya hibernado
     try {
@@ -400,8 +400,16 @@ export class SnakeRoom {
       const row = await this.env.DB.prepare("SELECT * FROM snake_games WHERE game_id=?").bind(this.gid).first();
       if (!row) return;
       if (row.status === "starting") {
-        if (row.start_at <= Date.now()) await this.start();
-        else await this.ctx.storage.setAlarm(row.start_at); // disparo temprano (fuentes duplicadas): reprograma
+        if (row.start_at) { // auto (cola/práctica): arranque a la hora
+          if (row.start_at <= Date.now()) await this.start();
+          else await this.ctx.storage.setAlarm(row.start_at); // disparo temprano (fuentes duplicadas): reprograma
+        } else { // manual: esta alarma es la caducidad (~45min)
+          if (this.sessions.size > 0) await this.ctx.storage.setAlarm(Date.now() + 15 * 60 * 1000); // hay gente esperando: prórroga
+          else { // sala fantasma: expira limpiamente
+            await this.env.DB.prepare("UPDATE snake_games SET status='expired' WHERE game_id=? AND status='starting'").bind(this.gid).run();
+            try { for (const s of JSON.parse(row.seats_json)) if (!s.id.startsWith("ai:")) await notify(this.env, s.id, "snake_expired", { game_id: this.gid, code: row.code }); } catch {}
+          }
+        }
         return;
       }
       if (row.status === "active") {
@@ -530,6 +538,7 @@ export class SnakeRoom {
       return Response.json({ tick: this.G.tick, status: this.G.status, food: this.G.food, snakes: this.G.snakes.map((s) => ({ id: s.id, body: s.body, dir: s.dir, health: s.health, alive: s.alive, place: s.place, kills: s.kills })) });
     }
     // WebSocket (gid/player/role llegan por query desde snakeWs)
+    if (!this.row && this.gid) { try { this.row = await this.env.DB.prepare("SELECT * FROM snake_games WHERE game_id=?").bind(this.gid).first(); } catch {} } // DO recién despertado: hidratar antes de saludar
     const { 0: client, 1: server } = new WebSocketPair();
     const player = url.searchParams.get("player") || "";
     const role = url.searchParams.get("role") || "play";
