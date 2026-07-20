@@ -136,7 +136,7 @@ export function applyTick(G, dirs) {
   for (const s of G.snakes) if (!s.alive && s.place === null) s.place = aliveNow + 1;
   // respawn comida: mantener ⌈vivas/2⌉
   const target = Math.max(1, Math.ceil(aliveNow / 2));
-  while (G.food.length < target) spawnFood(G);
+  while (G.food.length < target) { const before = G.food.length; spawnFood(G); if (G.food.length === before) break; } // sin hueco seguro libre → no forzar (la zona manda)
   // fin de partida
   if (aliveNow <= 1 || G.tick >= G.capTicks) {
     const survivors = G.snakes.filter((s) => s.alive).sort((a, b) => b.body.length - a.body.length || b.health - a.health || a.id.localeCompare(b.id));
@@ -158,11 +158,31 @@ export function aiDir(G, id) {
     const [dx, dy] = DIRS[d];
     return { d, nh: [s.body[0][0] + dx, s.body[0][1] + dy] };
   });
-  const safe = opts.filter((o) => o.nh[0] >= 0 && o.nh[1] >= 0 && o.nh[0] < G.w && o.nh[1] < G.h && !danger.has(o.nh.join(",")) && !inRed(G, o.nh[0], o.nh[1])); // la casa también respeta la zona
-  const pool = safe.length ? safe : opts.filter((o) => o.d !== OPP[s.dir]);
-  const pick = pool.length ? pool : [opts.find((o) => o.d === s.dir) || opts[0]];
-  let best = pick[0], bd = 1e9;
-  for (const o of pick) for (const f of G.food) { const dd = Math.abs(f[0] - o.nh[0]) + Math.abs(f[1] - o.nh[1]); if (dd < bd) { bd = dd; best = o; } }
+  const inB = (o) => o.nh[0] >= 0 && o.nh[1] >= 0 && o.nh[0] < G.w && o.nh[1] < G.h;
+  const moving = opts.filter((o) => inB(o) && !danger.has(o.nh.join(",")));
+  const safe = moving.filter((o) => !inRed(G, o.nh[0], o.nh[1]));
+  // regla de la casa v2.1 (del jefe): la roja no es muro — es riesgo. Se pisa cuando toca.
+  const redNow = inRed(G, s.body[0][0], s.body[0][1]);
+  const hungry = s.health < 40;
+  const cebo = G.food.some((f) => inRed(G, f[0], f[1])); // hay manzana en la roja
+  const pool = safe.length && !(hungry && cebo) ? safe : moving.length ? moving : [opts.find((o) => o.d === s.dir) || opts[0]];
+  let best = pool[0], bd = 1e9;
+  if (redNow) {
+    // quemándose: salir de la roja por el camino más corto (empate → la manzana más cercana)
+    for (const o of pool) {
+      const dist = inRed(G, o.nh[0], o.nh[1]) ? 40 : 0; // prefiere YA salir
+      let md = 1e9;
+      for (const f of G.food) md = Math.min(md, Math.abs(f[0] - o.nh[0]) + Math.abs(f[1] - o.nh[1]));
+      const sc = dist + md;
+      if (sc < bd) { bd = sc; best = o; }
+    }
+    return best.d;
+  }
+  for (const o of pool) for (const f of G.food) {
+    let dd = Math.abs(f[0] - o.nh[0]) + Math.abs(f[1] - o.nh[1]);
+    if (inRed(G, f[0], f[1])) dd += hungry ? 2 : 30; // cebo en rojo: solo si aprieta el hambre
+    if (dd < bd) { bd = dd; best = o; }
+  }
   return best ? best.d : s.dir;
 }
 

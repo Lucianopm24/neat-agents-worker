@@ -85,7 +85,7 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
 // ── 8. determinismo (mismo seed+moves ⇒ mismo JSON final) ──
 {
   const run = (seed) => {
-    const G = createGame(["a:A", "a:B", "ai:c1", "ai:c2"], { seed });
+    const G = createGame(["a:A", "a:B", "ai:c1", "ai:c2"], { seed, w: 11, h: 11, capTicks: 200 });
     let guard = 0;
     while (G.status === "active" && guard++ < 500) {
       const dirs = new Map(G.snakes.filter((s) => s.alive).map((s) => [s.id, aiDir(G, s.id)]));
@@ -102,7 +102,7 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
 {
   let okInv = true, allEnded = true, minTicks = 1e9, maxTicks = 0;
   for (let si = 0; si < 30 && okInv; si++) {
-    const G = createGame(["a:A", "a:B", "a:C", "ai:c1"], { seed: "mc" + si });
+    const G = createGame(["a:A", "a:B", "a:C", "ai:c1"], { seed: "mc" + si, w: 11, h: 11, capTicks: 200 });
     let guard = 0;
     while (G.status === "active") {
       if (guard++ > 210) { allEnded = false; break; }
@@ -127,7 +127,7 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
 
 // ── 10. la IA no se suicida en campo abierto (duelo de IAs dura, no acaba en 3 ticks) ──
 {
-  const G = createGame(["ai:casa1", "ai:casa2"], { seed: "duelo" });
+  const G = createGame(["ai:casa1", "ai:casa2"], { seed: "duelo", w: 11, h: 11, capTicks: 200 });
   let guard = 0;
   while (G.status === "active" && guard++ < 200) { const dirs = new Map(G.snakes.filter((x) => x.alive).map((x) => [x.id, aiDir(G, x.id)])); applyTick(G, dirs); }
   t(`duelo de IAs dura ≥10 ticks (duró ${G.tick})`, G.tick >= 10);
@@ -205,6 +205,27 @@ const mkG = (snakes, extra = {}) => ({ w: 11, h: 11, tickMs: 750, capTicks: 200,
   larga.body = larga.body.concat([[0, 0], [0, 1], [0, 2], [0, 3], [0, 4]]); // injerto determinista post-sim: alargar la ganadora
   t("zona: cap respeta ranking por longitud (motor alcanzó el tope)", G.tick >= 12 && G.status === "finished");
   t("zona: placements existen al cap", G.snakes.every((s) => s.place != null));
+}
+
+
+// ── Casa v2.1 (del jefe): roja = riesgo, no muro — sale solo cuando toca ──
+{
+  // hambrienta (❤20), manzana en rojo justo al lado → ENTRA a por ella
+  const G = mkG([mkSnake("ai:c", [[1, 5], [2, 5], [3, 5]], "left", { health: 20 }), mkSnake("a:d", [[9, 9], [9, 8], [9, 7]], "right")], { tick: 5, zoneEvery: 5, capTicks: 999 });
+  G.food = [[0, 5]];
+  t("casa: hambrienta entra a rojo por el cebo", aiDir(G, "ai:c") === "left");
+}
+{
+  // saciada (❤95), mismo cebo → NO entra
+  const G = mkG([mkSnake("ai:c", [[1, 5], [2, 5], [3, 5]], "left", { health: 95 }), mkSnake("a:d", [[9, 9], [9, 8], [9, 7]], "right")], { tick: 5, zoneEvery: 5, capTicks: 999 });
+  G.food = [[0, 5]];
+  t("casa: saciada NO entra a rojo por el cebo", aiDir(G, "ai:c") !== "left");
+}
+{
+  // pisando rojo sin comida a la vista → sale por el camino más corto
+  const G = mkG([mkSnake("ai:c", [[0, 6], [0, 7], [0, 8]], "right", { health: 90 }), mkSnake("a:d", [[9, 1], [9, 2], [9, 3]], "down")], { tick: 5, zoneEvery: 5, capTicks: 999 });
+  G.food = [];
+  t("casa: en rojo busca la salida (right)", aiDir(G, "ai:c") === "right");
 }
 
 console.log(`\n${pass} ✅ · ${fails} ❌`);
