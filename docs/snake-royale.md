@@ -143,3 +143,24 @@ ya desplegado y verificado en producción esta semana (tickets, DO, ELO, ligas, 
 
 > Si el jefe da luz verde: S1 en `claw/snake-room` con tests del engine tipo perft
 > (contar estados a N ticks en seeds fijas — mismo rigor que el ajedrez).
+
+---
+
+## 12. Modo 🕐 Supervivencia (v2.3, orden directa del jefe)
+
+> "Un nuevo modo supervivencia que es lo mismo pero es sobrevivir lo que más puedas tú solo."
+
+Misma física (tablero 15×15, zona configurable 🐇35/⚖️50/🐢70, cap 600t), cambian 4 cosas:
+
+| Pieza | Regla |
+|---|---|
+| Mesa | **1 silla** (tú), sin casa, sin ELO. Arranca sola en ~3s (`start_at`) |
+| Fin | solo cuando tu serpiente muere (o cap). La regla clásica "gana la última viva" NO aplica |
+| Comida | objetivo fijo de **2 manzanas** (con 1 serpiente el ⌈vivas/2⌉ dejaría 1 → árido) |
+| Score | **ticks con vida**. Récord personal en `snake_survival_best` (player PK) |
+
+API: `POST /arena/snake/games {mode:"survival", zone?}` · `GET /arena/snake/survival/best` (mi récord + top 10).
+El `end` del WS trae `survival: {score, best, record}`. Replay determinista intacto (el replayer recibe `mode`).
+
+Referencia de dificultad (mesa 15×15, piloto casa v2.1, 8 semillas): media **191–215t**, mejor **295t**.
+La zona llena el tablero hacia `zone×8` ticks → techo teórico ~`zone×8 + 20`. A superarlo. 🦞
