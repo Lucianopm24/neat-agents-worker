@@ -203,7 +203,7 @@ async function eloApply(env, placements) {
 function gameViewLite(row) {
   return {
     game_id: row.game_id, code: row.code, size: row.size, status: row.status, tick_ms: row.tick_ms,
-    ticks: row.ticks, created_at: row.created_at, seats: JSON.parse(row.seats_json || "[]"),
+    ticks: row.ticks, created_at: row.created_at, start_at: row.start_at, seats: JSON.parse(row.seats_json || "[]"),
     placements: row.placements_json ? JSON.parse(row.placements_json) : null,
   };
 }
