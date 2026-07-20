@@ -227,7 +227,7 @@ async function eloApply(env, placements) {
 function gameViewLite(row) {
   return {
     game_id: row.game_id, code: row.code, size: row.size, status: row.status, tick_ms: row.tick_ms,
-    ticks: row.ticks, created_at: row.created_at, start_at: row.start_at, fill_ai: row.fill_ai ?? 1, seats: JSON.parse(row.seats_json || "[]"),
+    ticks: row.ticks, created_at: row.created_at, start_at: row.start_at, fill_ai: row.fill_ai ?? 1, zone_every: row.zone_every ?? 50, seats: JSON.parse(row.seats_json || "[]"),
     placements: row.placements_json ? JSON.parse(row.placements_json) : null,
   };
 }
@@ -242,17 +242,18 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
     const body = await request.json().catch(() => ({}));
     const size = [2, 4, 6, 8, 12].includes(body?.size) ? body.size : 4;
     const fillAi = body?.solo ? 1 : (body?.ai === false ? 0 : 1);
+    const zoneEvery = [35, 50, 70].includes(body?.zone) ? body.zone : 50; // 🐇35 / ⚖️50 / 🐢70 (creador elige; regla del jefe)
     const gid = newGameId(), code = newCode();
     const seats = [{ id: playerId }];
     if (body?.solo) for (let i = 1; i < size; i++) seats.push({ id: "ai:casa" + i });
     const start_at = body?.solo ? Date.now() + 3000 : null; // privada con code: SOLO arranque manual del creador (regla del jefe 🦞) — caduca ~45min vacía
-    await env.DB.prepare("INSERT INTO snake_games (game_id, code, size, seed, tick_ms, ticks, status, seats_json, placements_json, transcript_b64, created_at, start_at, fill_ai) VALUES (?,?,?,?,?,0,'starting',?,NULL,'',?,?,?)")
-      .bind(gid, code, size, gid + ":" + code, parseInt(env.SNAKE_TICK_MS || "750", 10), JSON.stringify(seats), ISO(), start_at, fillAi).run();
+    await env.DB.prepare("INSERT INTO snake_games (game_id, code, size, seed, tick_ms, ticks, status, seats_json, placements_json, transcript_b64, created_at, start_at, fill_ai, zone_every) VALUES (?,?,?,?,?,0,'starting',?,NULL,'',?,?,?,?)")
+      .bind(gid, code, size, gid + ":" + code, parseInt(env.SNAKE_TICK_MS || "750", 10), JSON.stringify(seats), ISO(), start_at, fillAi, zoneEvery).run();
     const stub = env.SNAKE_ROOM.get(env.SNAKE_ROOM.idFromName(gid));
     ctx.waitUntil(stub.fetch("https://do/boot?gid=" + gid, { method: "POST" }));
     for (const s of seats) if (!s.id.startsWith("ai:")) await notify(env, s.id, "snake_starting", { game_id: gid, code, size, start_at });
     return Response.json({ success: true, data: { game: { game_id: gid, code, size, status: "starting", seats, start_at },
-      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `Comparte el code ${code} — la mesa NO arranca sola: la empieza su creador (botón 🚦 en la sala o POST /arena/snake/games/{id}/start). ${fillAi ? "Las sillas libres las cubre la casa 🏠." : "Sin IA de la casa 🚫🏠 — duelos puros: hacen falta ≥2 jugadores reales."} Caduca ~45min si queda vacía. Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
+      tip: body?.solo ? "Partida de práctica: arranca en ~3s con sillas IA. Pide ya tu ticket GET /arena/snake/ticket?game_id=" : `[zona cada ${zoneEvery}t] Comparte el code ${code} — la mesa NO arranca sola: la empieza su creador (botón 🚦 en la sala o POST /arena/snake/games/{id}/start). ${fillAi ? "Las sillas libres las cubre la casa 🏠." : "Sin IA de la casa 🚫🏠 — duelos puros: hacen falta ≥2 jugadores reales."} Caduca ~45min si queda vacía. Humans: se unen desde neat.qzz.io/snake.` } }, { headers: rl });
   }
 
   // POST /games/{id}/join {code} · POST /games/{id}/start (creador fuerza arranque) · GET /games/{id}
@@ -277,7 +278,7 @@ export async function snakeApi(env, ctx, request, url, sub, playerId, rl) {
         const seatsR = JSON.parse(row.seats_json);
         const own = seatsR.find((s) => s.id === playerId) || (playerId.startsWith("h:") && seatsR.find((s) => s.id === "a:" + playerId.slice(2)));
         if (!own) return errA(403, "NOT_YOUR_GAME", "Replays solo de mesas donde juegas tú o tu agente.", "Lobby público con replays: roadmap.");
-        return Response.json({ success: true, data: { game: gameViewLite(row), replay: { seed: row.seed, ticks: row.ticks, tick_ms: row.tick_ms, ids: seatsR.map((s) => s.id), w: 15, h: 15, cap: 600, zone_every: 50, placements: JSON.parse(row.placements_json || "[]"), transcript: row.transcript_b64 ? atob(row.transcript_b64) : "" } }, tip: "🎞️ Replay determinista: re-simulación con la misma seed (fiel en mesas v2 15×15 zona).", }, { headers: rl });
+        return Response.json({ success: true, data: { game: gameViewLite(row), replay: { seed: row.seed, ticks: row.ticks, tick_ms: row.tick_ms, ids: seatsR.map((s) => s.id), w: 15, h: 15, cap: 600, zone_every: row.zone_every ?? 50, placements: JSON.parse(row.placements_json || "[]"), transcript: row.transcript_b64 ? atob(row.transcript_b64) : "" } }, tip: "🎞️ Replay determinista: re-simulación con la misma seed (fiel en mesas v2 15×15 zona).", }, { headers: rl });
       }
       let live = null;
       if (row.status === "active") {
@@ -473,7 +474,7 @@ export class SnakeRoom {
     const seats = JSON.parse(row.seats_json);
     const ids = seats.map((s) => s.id);
     const CH = { u: "up", d: "down", l: "left", r: "right" };
-    const G = createGame(ids, { seed: row.seed, tickMs: row.tick_ms });
+    const G = createGame(ids, { seed: row.seed, tickMs: row.tick_ms, zoneEvery: row.zone_every || 50 });
     let p = 0;
     while (G.status === "active" && G.tick < snap.tick) {
       const aliveNow = G.snakes.filter((s) => s.alive);
@@ -508,7 +509,7 @@ export class SnakeRoom {
     let aiN = seats.filter((s) => s.id.startsWith("ai:")).length + 1;
     if (this.row.fill_ai !== 0) while (seats.length < this.row.size) seats.push({ id: "ai:casa" + aiN++ }); // ai:false → duelo puro sin casa (REST ya exigió ≥2 reales)
     await this.env.DB.prepare("UPDATE snake_games SET status='active', seats_json=? WHERE game_id=?").bind(JSON.stringify(seats), this.gid).run();
-    this.G = createGame(seats.map((s) => s.id), { seed: this.row.seed, tickMs: this.row.tick_ms });
+    this.G = createGame(seats.map((s) => s.id), { seed: this.row.seed, tickMs: this.row.tick_ms, zoneEvery: this.row.zone_every || 50 });
     this.seatIds = seats.map((s) => s.id);
     // espejo snake→humano dueño (para inputs web) y autopilots iniciales de la casa
     this.ownerOf = {};
@@ -527,7 +528,7 @@ export class SnakeRoom {
   }
   lobbyView() { // sala de espera: sillas + cuenta atrás (la UI pinta el lobby con esto)
     const seats = this.row ? JSON.parse(this.row.seats_json) : [];
-    return { t: "lobby", game_id: this.gid || null, size: this.row?.size || seats.length, code: this.row?.code || null, start_at: this.row?.start_at || null, fill_ai: this.row?.fill_ai ?? 1, seats };
+    return { t: "lobby", game_id: this.gid || null, size: this.row?.size || seats.length, code: this.row?.code || null, start_at: this.row?.start_at || null, fill_ai: this.row?.fill_ai ?? 1, zone_every: this.row?.zone_every ?? 50, seats };
   }
   lobbyTo(ws) { if (!this.row) return; try { ws.send(JSON.stringify(this.lobbyView())); } catch {} }
   lobbyMsg() { if (this.row) this.broadcast(this.lobbyView()); }
