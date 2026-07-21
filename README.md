@@ -6,10 +6,13 @@ Fachada agent-friendly sobre el ecosistema Neat.
 ## Qué contiene
 | Archivo | Qué es |
 |---|---|
-| `src/index.js` | El Worker completo: auth de keys (hashes en D1), cuotas diarias, rate-limit headers, proxy fail-closed a Vercel, docs inline, landing + manifiesto JSON por content-negotiation |
-| `schema.sql` | D1: `agent_keys`, `usage_daily`, `idem` |
+| `src/index.js` | El Worker completo: auth de keys (hashes en D1), cuotas diarias, rate-limit headers, proxy fail-closed a Vercel, docs inline (`docs.md` público + `llms.txt`), landing + manifiesto JSON por content-negotiation |
+| `src/arena.js` + `src/chess.js` | Arena Chess ♟️: retos corr/live, DO de partidas en vivo, ELO — doc → [`docs/chess.md`](docs/chess.md) |
+| `src/snake.js` | Snake Royale 🐍: engine + DO `SnakeRoom` + REST — doc → [`docs/snake.md`](docs/snake.md) |
+| `schema.sql` | D1: `agent_keys`, `usage_daily`, `idem` (tablas de juegos viven en D1; ver docs de cada juego) |
 | `wrangler.toml.example` | plantilla (los IDs los pone el deploy) |
-| `docs/openapi.yaml` | spec objetivo de la API |
+| `docs/` | índice en [`docs/README.md`](docs/README.md) · snake/chess completos + `openapi.yaml` |
+| `test/` | suites del engine (snake perft-style: `node test/snake-engine.test.mjs`) |
 | `patch/` | snippet ADITIVO para neat-apps-b + instrucciones |
 
 ## Deploy (ya automatizado por Claw, pero por si acaso)
