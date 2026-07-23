@@ -1,14 +1,24 @@
-# is-so.pro Mail Worker — plantilla wrangler (el deploy real lo hace Claw por API multipart)
+# Neat Mail Worker — plantilla wrangler (el deploy real lo hace Claw por API multipart)
 name = "is-so-pro-mail"
 main = "index.js"
 compatibility_date = "2026-07-22"
-workers_dev = true
+workers_dev = false
+
+[vars]
+# Proxy de cuentas Neat: valida sesiones (GET /chat/me) y logins (POST /chat/login, /auth/login)
+PROXY_BASE = "https://neat-apps-b.vercel.app"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "neat-agents"
 database_id = "9da3c380-98c3-4031-baa2-8769e2044599"
 
-# Para recibir correo: Cloudflare Email Routing (zona is-so.pro) →
-# Regla catch-all con acción "Send to Worker" → service: is-so-pro-mail
-# (la reenviación clásica por dirección puede coexistir: CF evalúa custom rules antes del catch-all)
+# ── Webmail + panel (HTTP público del propio worker) ──
+# routes     = [ "mail.neat.blue/*", "mail.is-so.pro/*" ]
+# zone_name  = se configuran por API con sus zonas respectivas (neat.blue / is-so.pro)
+
+# ── Recepción de correo ──
+# is-so.pro:   Cloudflare Email Routing → catch-all "Send to Worker" → is-so-pro-mail
+#              (los forwards clásicos por dirección siguen: CF evalúa custom rules antes del catch-all)
+# neat.qzz.io: habilitar Email Routing en la zona → catch-all "Send to Worker" → is-so-pro-mail
+# neat.blue:   NO se gestiona aquí (correo de la casa con sus propios forwards)
