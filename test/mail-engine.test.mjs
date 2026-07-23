@@ -128,6 +128,11 @@ globalThis.fetch = async (url, init = {}) => {
     if (tok === "jwt_dana") return R(200, { username: "Dana", role: "user", email: "dana@neat.qzz.io" });
     if (tok === "jwt_admin") return R(200, { username: "admin", role: "admin", email: "admin@neat.blue" });
     if (tok === "jwt_raro") return R(200, { username: "Daña Ñol", role: "user" });
+    if (tok === "jwt_fantasma404") return R(404, { error: "Usuario no encontrado" });
+    if (tok === "jwt_badjson") return R(200, { hola: "soy html disfrazado" });
+    if (tok === "jwt_throw") throw new Error("socket colgado (cold start)");
+    if (tok === "jwt_flaky" && !globalThis.__flaked) { globalThis.__flaked = 1; throw new Error("primer intento frío"); }
+    if (tok === "jwt_flaky") return R(200, { username: "Flaky", role: "user" });
     return R(401, { error: "invalid" });
   }
   return R(404, {});
@@ -278,6 +283,26 @@ const hreq = (path, tok = "jwt_dana", opts = {}) => new Request("https://mail.te
   _clearHumanCache();
   const r = await handleRequest(hreq("/api/v1/mail/messages/m_1"), env);
   t("dueño: su correo en buzón suspendido → 404 oculto", r.status === 404);
+}
+// 8.6 diagnóstico de sesión (los 401 que antes decían solo "vencida")
+{
+  const { env } = mkEnv2();
+  _clearHumanCache();
+  let r = await handleRequest(hreq("/api/v1/mail", "jwt_desconocido"), env);
+  let j = await r.json();
+  t("sesión: token rechazado por proxy (401) → causa explícita", r.status === 401 && j.error.code === "SESSION_REJECTED" && j.error.message.includes("no la reconoce") && j.error.message.includes("401"));
+  r = await handleRequest(hreq("/api/v1/mail", "jwt_fantasma404"), env);
+  j = await r.json();
+  t("sesión: cuenta inexistente (404) → 'NO existe' con fix de crearla de nuevo", r.status === 401 && j.error.message.includes("NO existe") && j.error.fix.includes("créalo de nuevo"));
+  r = await handleRequest(hreq("/api/v1/mail", "jwt_throw"), env);
+  j = await r.json();
+  t("sesión: proxy inalcanzable → SESSION_UNREACHABLE + pista cold start", r.status === 401 && j.error.code === "SESSION_UNREACHABLE" && j.error.fix.includes("segundos"));
+  r = await handleRequest(hreq("/api/v1/mail", "jwt_badjson"), env);
+  j = await r.json();
+  t("sesión: respuesta no-JSON del proxy → SESSION_BADJSON", r.status === 401 && j.error.code === "SESSION_BADJSON");
+  r = await handleRequest(hreq("/api/v1/mail", "jwt_flaky"), env);
+  j = await r.json();
+  t("sesión: primer intento cae y el REINTENTO salva (anti cold start)", r.status === 200 && j.success && j.data.kind === "human" && j.data.role === "user");
 }
 if (globalThis.fetch !== realFetch) globalThis.fetch = realFetch;
 
