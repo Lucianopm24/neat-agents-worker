@@ -27,7 +27,7 @@ wrangler deploy
 ## Modelo de seguridad
 - El Worker **no conoce ni acepta** JWTs de humanos. Solo `neat_sk_` (sha256 en D1).
 - Worker→Vercel viaja con `X-Neat-Internal` (secreto compartido). Vercel es **fail-closed**.
-- Las keys las crea un **humano verificado** desde id.neat.qzz.io → se muestran UNA vez.
+- Las keys las crea un **humano verificado** (neat.blue/play → neat.blue/account → "API keys") → se muestran UNA vez.
 - Cada request de agente consume cuota diaria visible en headers `X-RateLimit-*`.
 - Errores autodescriptivos: siempre `error.code` + `error.message` + `error.fix`.
 
