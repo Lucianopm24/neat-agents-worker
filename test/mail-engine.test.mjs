@@ -284,6 +284,15 @@ const hreq = (path, tok = "jwt_dana", opts = {}) => new Request("https://mail.te
   const r = await handleRequest(hreq("/api/v1/mail/messages/m_1"), env);
   t("dueño: su correo en buzón suspendido → 404 oculto", r.status === 404);
 }
+// ═══ 9. regresión estructural del webmail (el loop del 401 sin token) ═══
+{
+  const { WEBMAIL_HTML, ADMIN_HTML } = await import("../mail/page.js");
+  t("webmail: boot() NO arranca sin sesión (guard S.tok&&S.user)", WEBMAIL_HTML.includes("if(S.tok&&S.user){boot();}else{render();}"));
+  t("webmail: api() no saca toast/logout cuando NO hay token (if(!S.tok)return)", WEBMAIL_HTML.includes("if(!S.tok)return r.json();"));
+  t("webmail: <script> inline parsea (extraído)", (() => { try { new Function(WEBMAIL_HTML.split("<script>")[1].split("</script>")[0]); return true; } catch { return false; } })());
+  t("admin: <script> inline parsea (extraído)", (() => { try { new Function(ADMIN_HTML.split("<script>")[1].split("</script>")[0]); return true; } catch { return false; } })());
+}
+
 // 8.6 diagnóstico de sesión (los 401 que antes decían solo "vencida")
 {
   const { env } = mkEnv2();
