@@ -1,0 +1,14 @@
+# is-so.pro Mail Worker — plantilla wrangler (el deploy real lo hace Claw por API multipart)
+name = "is-so-pro-mail"
+main = "index.js"
+compatibility_date = "2026-07-22"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "neat-agents"
+database_id = "9da3c380-98c3-4031-baa2-8769e2044599"
+
+# Para recibir correo: Cloudflare Email Routing (zona is-so.pro) →
+# Regla catch-all con acción "Send to Worker" → service: is-so-pro-mail
+# (la reenviación clásica por dirección puede coexistir: CF evalúa custom rules antes del catch-all)

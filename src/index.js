@@ -393,6 +393,12 @@ export default {
     if (p === "/llms.txt") return new Response(LLMS_TXT, { headers: { "content-type": "text/plain; charset=utf-8" } });
     if (p === "/docs.md") return new Response(DOCS_MD, { headers: { "content-type": "text/markdown; charset=utf-8" } });
     if (p === "/manifest.json") return Response.json(manifest(env));
+
+    // 📮 is-so.pro mail: paso directo al worker de correo (él hace su propio auth+quota de neat_sk contra la misma D1)
+    if (p === "/api/v1/mail" || p.startsWith("/api/v1/mail/")) {
+      if (!env.MAIL) return Response.json({ success: false, error: { code: "MAIL_NOT_ENABLED", message: "El buzón is-so.pro aún no está enlazado.", fix: "El admin conecta el binding MAIL al worker is-so-pro-mail." } }, { status: 503 });
+      return env.MAIL.fetch(request);
+    }
     if (p === "/openapi.yaml")
       return Response.redirect("https://raw.githubusercontent.com/Lucianopm24/neat-agents-worker/main/docs/openapi.yaml", 302);
 

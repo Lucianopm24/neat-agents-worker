@@ -11,6 +11,7 @@ Fachada agent-friendly sobre el ecosistema Neat.
 | `src/snake.js` | Snake Royale 🐍: engine + DO `SnakeRoom` + REST — doc → [`docs/snake.md`](docs/snake.md) |
 | `schema.sql` | D1: `agent_keys`, `usage_daily`, `idem` (tablas de juegos viven en D1; ver docs de cada juego) |
 | `wrangler.toml.example` | plantilla (los IDs los pone el deploy) |
+| `mail/` | is-so.pro Mail 📮: email worker (routing→D1) + parser MIME + API — doc → [`docs/mail.md`](docs/mail.md) |
 | `docs/` | índice en [`docs/README.md`](docs/README.md) · snake/chess completos + `openapi.yaml` |
 | `test/` | suites del engine (snake perft-style: `node test/snake-engine.test.mjs`) |
 | `patch/` | snippet ADITIVO para neat-apps-b + instrucciones |
