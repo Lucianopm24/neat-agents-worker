@@ -52,6 +52,14 @@ const U8 = (s) => new TextEncoder().encode(s);
 {
   t("decodeWords deja texto plano intacto", decodeWords("sin palabras raras") === "sin palabras raras");
   t("parseAddr sin ángulos", parseAddr("solo@correo.io").addr === "solo@correo.io" && parseAddr("solo@correo.io").name === "");
+  // palabra ÚNICA con UTF-8 multibyte (emoji) — Q y B
+  t("eword: emoji Q-encoding (UTF-8 multibyte)", decodeWords("=?UTF-8?Q?" + "=F0=9F=91=91" + "?=") === "👑"); // Q() a mano NO: un '=' extra y el fixture miente
+  t("eword: emoji en medio de texto plano", decodeWords("ya recibe =?UTF-8?Q?=F0=9F=91=91?=") === "ya recibe 👑");
+  // ADYACENTES (bug real: \S* codicioso se tragaba la segunda palabra — SES así los manda)
+  { const b64 = Buffer.from("🚁", "utf8").toString("base64"); // b64 generado, nunca a mano
+    t("eword: dos adyacentes Q+B EXACTO (regresión bug emoji)", decodeWords("=?UTF-8?Q?prueba_de_fuego_?= =?UTF-8?B?" + b64 + "?=") === "prueba de fuego 🚁"); }
+  t("eword: texto adyacente estilo SES (Tu_buzón + 👑)", decodeWords("=?UTF-8?Q?Tu_buz=C3=B3n_neat.qzz.io_ya_recibe_?= =?UTF-8?Q?=F0=9F=91=91?=") === "Tu buzón neat.qzz.io ya recibe 👑");
+  t("eword: dos emoji Q adyacentes", decodeWords("Bautizo del buzón =?UTF-8?Q?=F0=9F=A6=9E?==?UTF-8?Q?=F0=9F=93=AE?=") === "Bautizo del buzón 🦞📮");
 }
 
 // ── D1 spy para integración ──
