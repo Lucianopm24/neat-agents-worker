@@ -21,7 +21,9 @@ export function decodeWords(s = "") {
   // 1) RFC2047: whitespace ENTRE encoded-words no cuenta (se concatenan)
   s = s.replace(/(\?=)[ \t\r\n]+(?==\?)/g, "$1");
   // 2) decodifica =?charset?B/Q?texto?= (varios seguidos incluidos)
-  return s.replace(/=\?([^?]+)\?([bBqQ])\?((?:[^?]|\?(?!=))\S*)\?=/g, (m, cs, enc, txt) => {
+  //    ojo: el texto son chars != '?' (o '?' sin '=' después) — sin \S* codicioso,
+  //    que se tragaba TAMBIÉN las palabras adyacentes ya unidas (emoji post-texto).
+  return s.replace(/=\?([^?]+)\?([bBqQ])\?((?:[^?]|\?(?!=))*)\?=/g, (m, cs, enc, txt) => {
     try { return charsetDecode(enc.toUpperCase() === "B" ? b64ToBytes(txt) : qpToBytes(txt.replace(/_/g, " ")), cs); }
     catch { return m; }
   });
