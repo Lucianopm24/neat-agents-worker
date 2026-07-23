@@ -61,22 +61,37 @@ async function authAgent(token, env) {
 }
 const humanCache = new Map(); // tokenHash → {me, exp} · vive por isolate, TTL corto
 export function _clearHumanCache() { humanCache.clear(); } // solo tests
+// devuelve {me} o {fail, status} — un 401 genérico sin causa no diagnostica nada
 async function authHuman(token, env) {
-  if (!env.PROXY_BASE) return null;
+  if (!env.PROXY_BASE) return { fail: "unreachable", status: 0 };
   const h = await sha256hex("t:" + token);
   const hit = humanCache.get(h);
-  if (hit && hit.exp > Date.now()) return hit.me;
-  let r;
-  try { r = await fetch(`${env.PROXY_BASE}/chat/me`, { headers: { authorization: `Bearer ${token}` } }); }
-  catch { return null; } // proxy inalcanzable → nulo temporal (no cacheado)
-  if (!r.ok) { humanCache.set(h, { me: null, exp: Date.now() + 30_000 }); return null; }
+  if (hit && hit.exp > Date.now()) return hit.me ? { me: hit.me } : { fail: "rejected", status: 401 };
+  const once = async () => {
+    try { return await fetch(`${env.PROXY_BASE}/chat/me`, { headers: { authorization: `Bearer ${token}` } }); }
+    catch { return null; }
+  };
+  let r = await once();
+  if (!r || r.status >= 500) { const r2 = await once(); if (r2) r = r2; } // reintento: cold start del proxy
+  if (!r) return { fail: "unreachable", status: 0 };
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 404) humanCache.set(h, { me: null, exp: Date.now() + 30_000 });
+    return { fail: "rejected", status: r.status };
+  }
   const u = await r.json().catch(() => null);
-  if (!u?.username) return null;
+  if (!u?.username) return { fail: "badjson", status: r.status };
   const me = { username: u.username, role: u.role === "admin" ? "admin" : "user", kind: "human" };
   humanCache.set(h, { me, exp: Date.now() + 300_000 });
   const used = await bumpQuota(env, await sha256hex("h:" + me.username));
-  return { ...me, limit: me.role === "admin" ? 500 : 100, used };
+  return { me: { ...me, limit: me.role === "admin" ? 500 : 100, used } };
 }
+const SESSION_FAILS = {
+  rejected401: ["Tu sesión no la reconoce el servidor Neat.", "Venció o es de otra llave de sesión: entra de nuevo desde el webmail."],
+  rejected404: ["Tu cuenta NO existe en el servidor Neat.", "Ese usuario no está en la base del proxy: créalo de nuevo en Neat y vuelve a entrar."],
+  unreachable: ["No pudimos hablar con el servidor Neat.", "Suele ser cold start del proxy: reintenta en 10-20 segundos."],
+  badjson: ["El servidor Neat respondió algo raro (no JSON).", "Reintenta en 10-20 segundos; si sigue, dale al admin esta hora exacta."],
+  rejected: ["El servidor Neat rechazó la sesión.", "Reintenta en 10-20 segundos; si sigue, entra de nuevo."],
+};
 async function bumpQuota(env, key) { // misma ley del gateway: cuota diaria por request
   const day = ISO().slice(0, 10);
   await env.DB.prepare("INSERT INTO usage_daily (key_hash, day, count) VALUES (?, ?, 1) ON CONFLICT(key_hash, day) DO UPDATE SET count = count + 1").bind(key, day).run();
@@ -137,10 +152,17 @@ export async function handleRequest(request, env) {
   const auth = request.headers.get("authorization") || "";
   const mSk = auth.match(/^Bearer\s+(neat_sk_[A-Za-z0-9]+)$/);
   const mJwt = auth.match(/^Bearer\s+(\S+)$/);
-  let me = null;
+  let me = null, sess = null;
   if (mSk) me = await authAgent(mSk[1], env);
-  else if (mJwt) me = await authHuman(mJwt[1], env);
-  if (!me) return err(401, "BAD_KEY", "Sesión inválida o vencida.", "Humanos: entra por el webmail (POST /api/v1/mail/login). Agentes: Bearer neat_sk_… de neat.blue/account.");
+  else if (mJwt) { const a = await authHuman(mJwt[1], env); me = a.me || null; sess = a.fail ? a : null; }
+  if (!me) {
+    if (sess) {
+      const k = sess.fail === "rejected" ? (SESSION_FAILS["rejected" + sess.status] ? "rejected" + sess.status : "rejected") : sess.fail;
+      const [msg, fix] = SESSION_FAILS[k];
+      return err(401, "SESSION_" + sess.fail.toUpperCase(), msg + (sess.status ? ` (neat-id respondió ${sess.status})` : ""), fix);
+    }
+    return err(401, "BAD_KEY", "Sesión inválida o vencida.", "Humanos: entra por el webmail (POST /api/v1/mail/login). Agentes: Bearer neat_sk_… de neat.blue/account.");
+  }
   const H = rl(me.limit, me.used);
   if (me.used > me.limit) return err(429, "QUOTA_EXCEEDED", `Cuota de ${me.limit} requests agotada por hoy.`, "Reset 00:00 UTC.", H);
 

@@ -30,7 +30,7 @@ const TOAST_JS = [
   "var S={tok:localStorage.getItem('nmail_token')||'',user:JSON.parse(localStorage.getItem('nmail_user')||'null')};",
   "function save(tok,user){S.tok=tok;S.user=user;localStorage.setItem('nmail_token',tok);localStorage.setItem('nmail_user',JSON.stringify(user));}",
   "function logout(){localStorage.removeItem('nmail_token');localStorage.removeItem('nmail_user');location.href='/';}",
-  "function api(path,opts){opts=opts||{};opts.headers=Object.assign({'content-type':'application/json','authorization':'Bearer '+S.tok},opts.headers||{});return fetch('/api/v1/mail'+path,opts).then(function(r){if(r.status===401&&path!=='/login'){toast('Sesión vencida — entra de nuevo',1);setTimeout(logout,900);throw new Error('401');}return r.json();});}",
+  "function api(path,opts){opts=opts||{};opts.headers=Object.assign({'content-type':'application/json','authorization':'Bearer '+S.tok},opts.headers||{});return fetch('/api/v1/mail'+path,opts).then(function(r){if(r.status===401&&path!=='/login'){return r.json().catch(function(){return null;}).then(function(j){var m=(j&&j.error&&j.error.message)||'Sesión vencida — entra de nuevo';var f=(j&&j.error&&j.error.fix)?' · '+j.error.fix:'';toast(m+f,1);setTimeout(logout,6000);throw new Error('401');});}return r.json();});}",
 ].join("\n");
 
 export const WEBMAIL_HTML = `<!doctype html>
